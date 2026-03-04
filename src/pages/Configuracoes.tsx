@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Settings, Truck, CheckCircle2, XCircle, Loader2, ShoppingBag, Mail, Shield, User, UserPlus } from "lucide-react";
+import { Settings, Truck, CheckCircle2, XCircle, Loader2, ShoppingBag, Mail, Shield, User, UserPlus, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function Configuracoes() {
@@ -39,6 +39,18 @@ export default function Configuracoes() {
   const [bizToken, setBizToken] = useState("");
   const [isTestingBiz, setIsTestingBiz] = useState(false);
   const [bizStatus, setBizStatus] = useState<"idle" | "success" | "error">("idle");
+
+  const [braspressCnpj, setBraspressCnpj] = useState("");
+  const [braspressToken, setBraspressToken] = useState("");
+  const [isTestingBraspress, setIsTestingBraspress] = useState(false);
+  const [braspressStatus, setBraspressStatus] = useState<"idle" | "success" | "error">("idle");
+
+  // --- NOVOS ESTADOS: CORREIOS ---
+  const [correiosContrato, setCorreiosContrato] = useState("");
+  const [correiosDr, setCorreiosDr] = useState("");
+  const [correiosToken, setCorreiosToken] = useState("");
+  const [isTestingCorreios, setIsTestingCorreios] = useState(false);
+  const [correiosStatus, setCorreiosStatus] = useState<"idle" | "success" | "error">("idle");
 
   const [isLoadingConfigs, setIsLoadingConfigs] = useState(true);
 
@@ -101,7 +113,7 @@ export default function Configuracoes() {
 
         const { data, error } = await supabase
           .from('configuracoes_empresa')
-          .select('onclick_url, onclick_token, intelipost_url, intelipost_token, magento_url, magento_token')
+          .select('onclick_url, onclick_token, intelipost_url, intelipost_token, magento_url, magento_token, braspress_cnpj, braspress_token, correios_contrato, correios_dr, correios_token')
           .eq('user_id', session.user.id)
           .maybeSingle(); 
 
@@ -114,6 +126,13 @@ export default function Configuracoes() {
           if (data.intelipost_token) setIntelipostKey(data.intelipost_token);
           if (data.magento_url) setBizUrl(data.magento_url);
           if (data.magento_token) setBizToken(data.magento_token);
+          if (data.braspress_cnpj) setBraspressCnpj(data.braspress_cnpj);
+          if (data.braspress_token) setBraspressToken(data.braspress_token);
+          
+          // Carregar credenciais Correios
+          if (data.correios_contrato) setCorreiosContrato(data.correios_contrato);
+          if (data.correios_dr) setCorreiosDr(data.correios_dr);
+          if (data.correios_token) setCorreiosToken(data.correios_token);
         }
       } catch (error) {
         console.error("Erro ao carregar configurações:", error);
@@ -154,9 +173,6 @@ export default function Configuracoes() {
       toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL base e o Token da API Onclick." });
       return;
     }
-    localStorage.setItem("onclick_base_url", baseUrl);
-    localStorage.setItem("onclick_api_token", apiToken);
-    
     const sucesso = await saveToDatabase({ onclick_url: baseUrl, onclick_token: apiToken });
     if (sucesso) toast({ title: "Configurações Onclick salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
@@ -195,9 +211,6 @@ export default function Configuracoes() {
       toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL e a API Key da Intelipost." });
       return;
     }
-    localStorage.setItem("intelipost_base_url", intelipostUrl);
-    localStorage.setItem("intelipost_api_key", intelipostKey);
-    
     const sucesso = await saveToDatabase({ intelipost_url: intelipostUrl, intelipost_token: intelipostKey });
     if (sucesso) toast({ title: "Configurações Intelipost salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
@@ -236,9 +249,6 @@ export default function Configuracoes() {
       toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL e o Token da BizCommerce." });
       return;
     }
-    localStorage.setItem("biz_base_url", bizUrl);
-    localStorage.setItem("biz_api_token", bizToken);
-    
     const sucesso = await saveToDatabase({ magento_url: bizUrl, magento_token: bizToken });
     if (sucesso) toast({ title: "Configurações BizCommerce salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
@@ -274,6 +284,89 @@ export default function Configuracoes() {
       toast({ variant: "destructive", title: "Falha na conexão", description: error.message || "Erro ao conectar com Magento." });
     } finally {
       setIsTestingBiz(false);
+    }
+  };
+
+  // --- Handlers Braspress ---
+  const handleSaveBraspress = async () => {
+    if (!braspressCnpj || !braspressToken) {
+      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha o CNPJ e o Token da Braspress." });
+      return;
+    }
+    const sucesso = await saveToDatabase({ braspress_cnpj: braspressCnpj, braspress_token: braspressToken });
+    if (sucesso) toast({ title: "Configurações Braspress salvas", description: "As credenciais foram atualizadas na nuvem." });
+  };
+
+  const handleTestBraspress = async () => {
+    if (!braspressCnpj || !braspressToken) {
+      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
+      return;
+    }
+    setIsTestingBraspress(true);
+    setBraspressStatus("idle");
+
+    try {
+      const { data, error } = await supabase.functions.invoke('braspress-proxy', {
+        body: { 
+          action: 'TEST_CONNECTION',
+          cnpj: braspressCnpj,
+          token: braspressToken
+        }
+      });
+
+      if (error) throw error;
+      
+      setBraspressStatus("success");
+      toast({ title: "Sucesso!", description: "Conexão com a Braspress validada." });
+      handleSaveBraspress();
+    } catch (error: any) {
+      console.error("Erro Braspress:", error);
+      setBraspressStatus("error");
+      toast({ variant: "destructive", title: "Falha na conexão", description: error.message || "Erro ao conectar com a API Braspress." });
+    } finally {
+      setIsTestingBraspress(false);
+    }
+  };
+
+  // --- Handlers Correios ---
+  const handleSaveCorreios = async () => {
+    if (!correiosContrato || !correiosDr || !correiosToken) {
+      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha o Contrato, DR e Token dos Correios." });
+      return;
+    }
+    const sucesso = await saveToDatabase({ correios_contrato: correiosContrato, correios_dr: correiosDr, correios_token: correiosToken });
+    if (sucesso) toast({ title: "Configurações Correios salvas", description: "As credenciais foram atualizadas na nuvem." });
+  };
+
+  const handleTestCorreios = async () => {
+    if (!correiosContrato || !correiosDr || !correiosToken) {
+      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
+      return;
+    }
+    setIsTestingCorreios(true);
+    setCorreiosStatus("idle");
+
+    try {
+      const { data, error } = await supabase.functions.invoke('correios-proxy', {
+        body: { 
+          action: 'TEST_CONNECTION',
+          contrato: correiosContrato,
+          dr: correiosDr,
+          token: correiosToken
+        }
+      });
+
+      if (error) throw error;
+      if (data.error) throw new Error(data.error);
+      
+      setCorreiosStatus("success");
+      toast({ title: "Sucesso!", description: data.message || "Conexão com os Correios validada." });
+      handleSaveCorreios();
+    } catch (error: any) {
+      setCorreiosStatus("error");
+      toast({ variant: "destructive", title: "Falha na conexão", description: error.message });
+    } finally {
+      setIsTestingCorreios(false);
     }
   };
 
@@ -475,7 +568,7 @@ export default function Configuracoes() {
           <Card className="bg-stone-900 border-blue-900/50 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
-                <Truck className="w-5 h-5 text-blue-500" /> Credenciais Intelipost
+                <Package className="w-5 h-5 text-blue-500" /> Credenciais Intelipost
               </CardTitle>
               <CardDescription className="text-stone-400">API para cálculo de frete e rastreio (TMS).</CardDescription>
             </CardHeader>
@@ -498,6 +591,75 @@ export default function Configuracoes() {
                 <Button onClick={handleSaveIntelipost} variant="outline" className="bg-stone-950 border-stone-700 text-stone-200 hover:bg-stone-800 hover:text-white">Salvar</Button>
                 <Button onClick={handleTestIntelipost} disabled={isTestingIntelipost} className="bg-blue-600 hover:bg-blue-700 text-white border-none">
                   {isTestingIntelipost ? <Loader2 className="animate-spin mr-2 w-4 h-4" /> : "Testar Intelipost"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-stone-900 border-emerald-900/50 shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
+                <Truck className="w-5 h-5 text-emerald-500" /> Credenciais Braspress
+              </CardTitle>
+              <CardDescription className="text-stone-400">Conexão direta com a API Braspress.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="braspressCnpj" className="text-stone-400">CNPJ (Apenas números)</Label>
+                <Input id="braspressCnpj" placeholder="Ex: 12345678000199" value={braspressCnpj} onChange={(e) => setBraspressCnpj(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-emerald-500" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="braspressToken" className="text-stone-400">Token de Acesso / Senha</Label>
+                <Input id="braspressToken" type="password" placeholder="Sua senha ou token Braspress" value={braspressToken} onChange={(e) => setBraspressToken(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-emerald-500" />
+              </div>
+              {braspressStatus !== "idle" && (
+                <div className={cn("flex items-center gap-2 p-3 rounded-lg text-sm border", braspressStatus === "success" ? "bg-green-950/40 text-green-400 border-green-900/50" : "bg-red-950/40 text-red-400 border-red-900/50")}>
+                  {braspressStatus === "success" ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                  <span className="font-medium">{braspressStatus === "success" ? "Braspress Conectada!" : "Falha na conexão."}</span>
+                </div>
+              )}
+              <div className="flex gap-3 pt-2">
+                <Button onClick={handleSaveBraspress} variant="outline" className="bg-stone-950 border-stone-700 text-stone-200 hover:bg-stone-800 hover:text-white">Salvar</Button>
+                <Button onClick={handleTestBraspress} disabled={isTestingBraspress} className="bg-emerald-600 hover:bg-emerald-700 text-white border-none">
+                  {isTestingBraspress ? <Loader2 className="animate-spin mr-2 w-4 h-4" /> : "Testar Braspress"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* CARD DOS CORREIOS */}
+          <Card className="bg-stone-900 border-yellow-900/50 shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
+                <Package className="w-5 h-5 text-yellow-500" /> Credenciais Correios
+              </CardTitle>
+              <CardDescription className="text-stone-400">API de Faturas e Divergências (Meu Correios).</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-3">
+                <div className="space-y-2 w-2/3">
+                  <Label htmlFor="correiosContrato" className="text-stone-400">Contrato</Label>
+                  <Input id="correiosContrato" placeholder="Ex: 9912345678" value={correiosContrato} onChange={(e) => setCorreiosContrato(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-yellow-500" />
+                </div>
+                <div className="space-y-2 w-1/3">
+                  <Label htmlFor="correiosDr" className="text-stone-400">DR</Label>
+                  <Input id="correiosDr" placeholder="Ex: 74" value={correiosDr} onChange={(e) => setCorreiosDr(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-yellow-500" />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="correiosToken" className="text-stone-400">Token de Acesso (API Key)</Label>
+                <Input id="correiosToken" type="password" placeholder="Chave de Acesso" value={correiosToken} onChange={(e) => setCorreiosToken(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-yellow-500" />
+              </div>
+              {correiosStatus !== "idle" && (
+                <div className={cn("flex items-center gap-2 p-3 rounded-lg text-sm border", correiosStatus === "success" ? "bg-green-950/40 text-green-400 border-green-900/50" : "bg-red-950/40 text-red-400 border-red-900/50")}>
+                  {correiosStatus === "success" ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                  <span className="font-medium">{correiosStatus === "success" ? "Correios Conectado!" : "Falha na conexão."}</span>
+                </div>
+              )}
+              <div className="flex gap-3 pt-2">
+                <Button onClick={handleSaveCorreios} variant="outline" className="bg-stone-950 border-stone-700 text-stone-200 hover:bg-stone-800 hover:text-white">Salvar</Button>
+                <Button onClick={handleTestCorreios} disabled={isTestingCorreios} className="bg-yellow-600 hover:bg-yellow-700 text-white border-none">
+                  {isTestingCorreios ? <Loader2 className="animate-spin mr-2 w-4 h-4" /> : "Testar Correios"}
                 </Button>
               </div>
             </CardContent>

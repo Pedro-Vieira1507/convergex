@@ -16,6 +16,7 @@ import Rastreio from "./pages/Rastreio";
 import Configuracoes from "./pages/Configuracoes";
 import NotFound from "./pages/NotFound";
 import WMS from "./pages/WMS";
+import Auditoria from "./pages/Auditoria";
 
 // Aqui está a correção: Importar Pedidos apenas uma vez
 import Pedidos from "./pages/Pedidos"; 
@@ -66,6 +67,7 @@ const App = () => {
               {/* Esta rota vai carregar a integração com Magento */}
               <Route path="/pedidos" element={<Pedidos />} />
               <Route path="/configuracoes" element={<Configuracoes />} />
+              <Route path="/auditoria" element={<Auditoria />} />
             </Route>
 
             <Route path="*" element={<NotFound />} />

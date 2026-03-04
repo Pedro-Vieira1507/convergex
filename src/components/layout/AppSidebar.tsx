@@ -10,19 +10,21 @@ import {
   Map,
   LogOut,
   KeyRound,
-  Building2 
+  Building2,
+  FileSearch // 1. Ícone adicionado para a Auditoria
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
-import { Badge } from "@/components/ui/badge"; // Certifique-se de que este import existe
+import { Badge } from "@/components/ui/badge";
 
-// 1. ADICIONAMOS A REGRA DE QUEM PODE VER O QUÊ
+// 2. ATUALIZAMOS A LISTA DE MENUS (Adicionando Auditoria de Fretes após Rastreio)
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/", allowedRoles: ['admin', 'gerente'] },
   { icon: Package, label: "Estoque", path: "/estoque", allowedRoles: ['admin', 'gerente', 'operador'] },
   { icon: Truck, label: "Rastreio", path: "/rastreio", allowedRoles: ['admin', 'gerente', 'operador'] },
+  { icon: FileSearch, label: "Auditoria de Fretes", path: "/auditoria", allowedRoles: ['admin', 'gerente'] }, // <- NOVO MENU
   { icon: ShoppingCart, label: "Pedidos Site", path: "/pedidos", allowedRoles: ['admin', 'gerente'] },
   { icon: Map, label: "WMS Logística", path: "/wms", allowedRoles: ['admin', 'gerente', 'operador'] },
   { icon: Settings, label: "Configurações", path: "/configuracoes", allowedRoles: ['admin'] },
@@ -33,17 +35,19 @@ export function AppSidebar() {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   
-  // Novos estados para guardar o Perfil e a Empresa
+  // Estados para guardar o Perfil e a Empresa
   const [empresaNome, setEmpresaNome] = useState("Carregando...");
   const [userRole, setUserRole] = useState<string | null>(null);
+  
+  // Controla a visibilidade do menu do utilizador
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
 
-  // 2. BUSCAR O CARGO (ROLE) E A EMPRESA AO MESMO TEMPO
+  // BUSCAR O CARGO (ROLE) E A EMPRESA AO MESMO TEMPO
   useEffect(() => {
     async function fetchPerfilEEmpresa() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Vai à tabela de perfis buscar a role e traz junto o nome da empresa associada
       const { data, error } = await supabase
         .from("perfis")
         .select(`
@@ -56,7 +60,6 @@ export function AppSidebar() {
       if (data && !error) {
         setUserRole(data.role);
         
-        // Trata o retorno do Supabase (que pode vir como objeto ou array dependendo da relação)
         const nomeDaEmpresa = Array.isArray(data.empresas) 
           ? data.empresas[0]?.nome 
           : (data.empresas as any)?.nome;
@@ -73,8 +76,7 @@ export function AppSidebar() {
     navigate("/login");
   };
 
-  // 3. FILTRA O MENU COM BASE NA PERMISSÃO
-  // Se ainda não carregou a role, não mostra nada para evitar "piscar" menus errados
+  // FILTRA O MENU COM BASE NA PERMISSÃO
   const filteredNavItems = navItems.filter(item => 
     userRole && item.allowedRoles.includes(userRole)
   );
@@ -137,78 +139,85 @@ export function AppSidebar() {
       </nav>
 
       {/* Rodapé Compacto */}
-      <div className="border-t border-stone-800/60 p-3 space-y-1 shrink-0 bg-stone-950">
-        {!collapsed ? (
-          <>
-            <div className="flex items-center gap-3 px-2 py-2 mb-2 bg-stone-900/50 rounded-lg border border-stone-800/50">
-              <Building2 className="w-8 h-8 text-stone-400 flex-shrink-0 p-1 bg-stone-800 rounded-md" />
-              <div className="flex flex-col overflow-hidden leading-tight w-full">
-                <span className="text-sm font-bold text-stone-200 truncate" title={empresaNome}>
-                  {empresaNome}
-                </span>
-                {/* 4. MOSTRA O CARGO DO UTILIZADOR */}
-                <div className="flex items-center justify-between mt-1">
-                  <span className="text-[10px] text-stone-500 uppercase tracking-wider font-semibold">
-                    Minha Conta
-                  </span>
-                  {userRole && (
-                    <Badge variant="outline" className={cn(
-                      "text-[9px] px-1.5 py-0 h-4 uppercase tracking-wider",
-                      userRole === 'admin' ? "bg-red-950/40 text-red-400 border-red-900/50" :
-                      userRole === 'gerente' ? "bg-blue-950/40 text-blue-400 border-blue-900/50" :
-                      "bg-stone-800 text-stone-400 border-stone-700"
-                    )}>
-                      {userRole}
-                    </Badge>
-                  )}
-                </div>
-              </div>
-            </div>
-            
+      <div className="border-t border-stone-800/60 p-3 space-y-1 shrink-0 bg-stone-950 flex flex-col justify-end">
+        
+        {/* Menu expansível (Visível apenas se isUserMenuOpen for true) */}
+        {isUserMenuOpen && (
+          <div className={cn(
+            "flex flex-col gap-1 mb-2 animate-in slide-in-from-bottom-2 fade-in-50",
+            collapsed ? "items-center" : "px-1"
+          )}>
             <Link 
               to="/conta" 
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-stone-400 hover:bg-stone-800/50 hover:text-stone-200 transition-all duration-200"
+              title={collapsed ? "Alterar Senha" : undefined}
+              className={cn(
+                "flex items-center rounded-lg text-sm font-medium text-stone-400 hover:bg-stone-800/50 hover:text-stone-200 transition-all duration-200",
+                collapsed ? "p-2.5 justify-center w-full" : "gap-3 px-3 py-2.5"
+              )}
             >
               <KeyRound className="w-5 h-5 flex-shrink-0" />
-              <span>Alterar Senha</span>
+              {!collapsed && <span>Alterar Senha</span>}
             </Link>
 
             <button 
               onClick={handleLogout}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-red-500 hover:bg-red-950/30 transition-all duration-200 w-full text-left"
+              title={collapsed ? "Sair do Sistema" : undefined}
+              className={cn(
+                "flex items-center rounded-lg text-sm font-medium text-red-500 hover:bg-red-950/30 transition-all duration-200 text-left",
+                collapsed ? "p-2.5 justify-center w-full" : "gap-3 px-3 py-2.5 w-full"
+              )}
             >
               <LogOut className="w-5 h-5 flex-shrink-0" />
-              <span>Sair do Sistema</span>
-            </button>
-          </>
-        ) : (
-          <div className="flex flex-col items-center gap-2">
-            <Building2 className="w-8 h-8 text-stone-400 mb-2 mt-1 p-1.5 bg-stone-900 rounded-lg border border-stone-800" title={empresaNome} />
-            
-            <Link 
-              to="/conta" 
-              title="Alterar Senha"
-              className="p-2.5 rounded-lg text-stone-400 hover:bg-stone-800/50 hover:text-stone-200 transition-all duration-200"
-            >
-              <KeyRound className="w-5 h-5" />
-            </Link>
-
-            <button 
-              onClick={handleLogout}
-              title="Sair do Sistema"
-              className="p-2.5 rounded-lg text-red-500 hover:bg-red-950/30 transition-all duration-200"
-            >
-              <LogOut className="w-5 h-5" />
+              {!collapsed && <span>Sair do Sistema</span>}
             </button>
           </div>
         )}
 
+        {/* Box da Empresa (Agora atua como um botão para expandir/recolher o menu) */}
+        <div 
+          onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+          className={cn(
+            "cursor-pointer bg-stone-900/50 rounded-lg border border-stone-800/50 hover:bg-stone-800/80 transition-colors flex items-center select-none",
+            collapsed ? "p-1.5 justify-center mb-2 mx-auto w-10 h-10 mt-1" : "gap-3 px-2 py-2 mb-2 w-full text-left"
+          )}
+          title={collapsed ? empresaNome : undefined}
+        >
+          <Building2 className={cn("text-stone-400 flex-shrink-0", collapsed ? "w-6 h-6" : "w-8 h-8 p-1 bg-stone-800 rounded-md")} />
+          
+          {!collapsed && (
+            <div className="flex flex-col overflow-hidden leading-tight w-full">
+              <span className="text-sm font-bold text-stone-200 truncate" title={empresaNome}>
+                {empresaNome}
+              </span>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-[10px] text-stone-500 uppercase tracking-wider font-semibold">
+                  Minha Conta
+                </span>
+                {userRole && (
+                  <Badge variant="outline" className={cn(
+                    "text-[9px] px-1.5 py-0 h-4 uppercase tracking-wider",
+                    userRole === 'admin' ? "bg-red-950/40 text-red-400 border-red-900/50" : 
+                    userRole === 'gerente' ? "bg-blue-950/40 text-blue-400 border-blue-900/50" : 
+                    "bg-stone-800 text-stone-400 border-stone-700"
+                  )}>
+                    {userRole}
+                  </Badge>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="h-px bg-stone-800/60 my-2 w-full" />
 
+        {/* Botão de Fechar/Abrir o Sidebar */}
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setCollapsed(!collapsed)}
+          onClick={() => {
+            setCollapsed(!collapsed);
+            setIsUserMenuOpen(false); // Recolhe o menu de usuário automaticamente ao mudar o sidebar
+          }}
           className="w-full justify-center text-stone-500 hover:bg-stone-800/50 hover:text-stone-300 h-10"
         >
           {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
