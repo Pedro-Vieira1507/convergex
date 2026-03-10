@@ -24,8 +24,50 @@ Deno.serve(async (req) => {
     if (authError || !user) throw new Error('Sessão expirada.')
 
     const body = await req.json()
-    const { action, cnpj, token, searchType, searchValue } = body
+    // Adicionamos o invoiceNumber aqui na desestruturação
+    const { action, cnpj, token, searchType, searchValue, invoiceNumber } = body
 
+    // =========================================================
+    // AÇÃO NOVO: BUSCAR PEDIDO PELA NOTA FISCAL NA INTELIPOST
+    // =========================================================
+    if (action === 'GET_BY_INVOICE') {
+      if (!invoiceNumber) {
+        return new Response(JSON.stringify({ estimado: 0, error: 'Informe a Nota Fiscal.' }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } })
+      }
+
+      const INTELIPOST_API_KEY = Deno.env.get('INTELIPOST_API_KEY') || ''
+      const urlIntelipost = `https://api.intelipost.com.br/api/v1/shipment_order/invoice/${invoiceNumber}`
+
+      const response = await fetch(urlIntelipost, {
+        headers: { 
+          'api-key': INTELIPOST_API_KEY, 
+          'Accept': 'application/json' 
+        }
+      })
+
+      if (!response.ok) {
+        return new Response(JSON.stringify({ estimado: 0, error: 'Nota não encontrada no TMS' }), { headers: { ...corsHeaders, "Content-Type": "application/json" } })
+      }
+
+      const data = await response.json()
+      
+      // Verifica se a Intelipost devolveu dados válidos e extrai o custo
+      if (data.content && data.content.length > 0) {
+        const order = data.content[0]
+        return new Response(JSON.stringify({ 
+          estimado: order.provider_shipping_cost || 0,
+          dados_completos: order // Enviamos tudo para o React usar no modal visual
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } })
+      }
+
+      return new Response(JSON.stringify({ estimado: 0 }), { headers: { ...corsHeaders, "Content-Type": "application/json" } })
+    }
+
+
+    // =========================================================
+    // AÇÕES EXISTENTES: INTEGRAÇÃO BRASPRESS (API v2 / v3)
+    // =========================================================
+    
     // 1. OBTÉM CREDENCIAIS DO BANCO
     let finalCnpj = cnpj;
     let finalToken = token;
@@ -58,9 +100,7 @@ Deno.serve(async (req) => {
       'Accept': 'application/json'
     };
 
-    // ==========================================
     // AÇÃO 1: TESTE DA TELA DE CONFIGURAÇÕES
-    // ==========================================
     if (action === 'TEST_CONNECTION') {
       const testUrl = `https://api.braspress.com/v3/tracking/byNumPedido/${usuarioFormatado}/1/json`;
       const response = await fetch(testUrl, { method: 'GET', headers: apiHeaders });
@@ -71,9 +111,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: true, message: "Conexão validada!" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // ==========================================
     // AÇÃO 2: BUSCA NA TELA DE AUDITORIA
-    // ==========================================
     if (action === 'GET_TRACKING') {
       if (!searchValue) {
         return new Response(JSON.stringify({ error: 'Informe o número da NF ou Pedido.' }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } })

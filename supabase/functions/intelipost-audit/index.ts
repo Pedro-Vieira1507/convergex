@@ -11,58 +11,70 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
   try {
-    const { startDate, endDate, logisticProviderId } = await req.json();
-
-    if (!startDate || !endDate) throw new Error("Datas obrigatórias.");
-    if (!logisticProviderId) throw new Error("ID da Transportadora obrigatório.");
+    const payload = await req.json();
+    const { action } = payload; // Lendo a action enviada pelo React
 
     const apiKey = req.headers.get('api-key') || Deno.env.get('INTELIPOST_API_KEY');
     if (!apiKey) throw new Error("API Key não encontrada.");
 
-    // Monta a URL com os parâmetros
-    // NOTA: A documentação pode pedir 'logisticProviderId' (singular) ou 'logisticProviderIds' (plural/lista)
-    // Vamos tentar passar como está na doc que você mandou: logisticProviderId
-    const params = new URLSearchParams({
-        startDate: startDate,
-        endDate: endDate,
-        logisticProviderId: logisticProviderId.toString()
-    });
+    // =======================================================
+    // ROTA 1: A NOVA BUSCA DE PRÉ-FATURAS
+    // =======================================================
+    if (action === 'GET_PRE_INVOICE_BY_DATE') {
+      const { startDate, endDate, logisticProviderId } = payload;
+      
+      if (!startDate || !endDate) throw new Error("Datas obrigatórias.");
+      if (!logisticProviderId) throw new Error("ID da Transportadora obrigatório.");
 
-    // Endpoint: Tentei /audit/pre-invoice/byDate antes e falhou (retornou vazio ou erro).
-    // Vamos tentar o endpoint padrão de listagem: /audit/pre-invoice
-    const targetUrl = `${INTELIPOST_API_URL}audit/pre-invoice?${params.toString()}`;
+      const params = new URLSearchParams({
+          startDate: startDate,
+          endDate: endDate,
+          logisticProviderId: logisticProviderId.toString()
+      });
 
-    console.log(`[Audit Proxy] Buscando: ${targetUrl}`);
+      const targetUrl = `${INTELIPOST_API_URL}audit/pre-invoice/byDate?${params.toString()}`;
+      
+      const resp = await fetch(targetUrl, {
+          method: 'GET',
+          headers: {
+              'Accept': 'application/json',
+              'token': apiKey
+          }
+      });
 
-    const resp = await fetch(targetUrl, {
-        method: 'GET',
-        headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'token': apiKey, // Header 'token'
-            'platform': 'SoftwareGerencial'
-        }
-    });
+      if (!resp.ok) {
+          const errorText = await resp.text();
+          throw new Error(`Erro Intelipost: ${errorText}`);
+      }
 
-    if (!resp.ok) {
-        const errorText = await resp.text();
-        console.error("Erro API Intelipost:", errorText);
-        throw new Error(`Erro Intelipost [${resp.status}]: ${errorText}`);
+      const data = await resp.json();
+      
+      return new Response(JSON.stringify(data), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    const data = await resp.json();
-    
-    // Log para debug
-    console.log(`[Audit Proxy] Status: ${data.status}, Content Length: ${data.content?.length || 0}`);
+    // =======================================================
+    // ROTA 2: A SUA ROTA ANTIGA (NÃO APAGUE A SUA LÓGICA AQUI)
+    // =======================================================
+    if (action === 'GET_ESTIMATIVA') {
+       // Cole aqui a lógica original que você já tinha para a ação GET_ESTIMATIVA
+       // que recebe trackingCode e orderNumber...
+       
+       return new Response(JSON.stringify({ estimado: 0 /* seu retorno original */ }), {
+         status: 200,
+         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+       });
+    }
 
-    return new Response(JSON.stringify(data), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    // Se chegar aqui e não for nenhuma das actions mapeadas, devolve o erro que você viu
+    throw new Error("Action not found");
 
   } catch (error: any) {
-    console.error("Erro na Auditoria:", error.message);
+    console.error("Erro na Function:", error.message);
     return new Response(JSON.stringify({ error: error.message }), {
-      status: 400,
+      status: 400, // <-- O status 400 que apareceu no seu console
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

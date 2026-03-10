@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Map, UploadCloud, MapPin, RefreshCw, Route as RouteIcon, ListChecks, CheckCircle, X, Check, Edit3, Plus, Trash2, Maximize, Layers, Building2 } from "lucide-react";
+import { Map, UploadCloud, MapPin, RefreshCw, Route as RouteIcon, ListChecks, CheckCircle, X, Check, Edit3, Plus, Trash2, Maximize, Layers, Building2, Package } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
@@ -17,6 +17,10 @@ interface PickItem {
   codigo: string; sku: string; descricao: string; local: string; qtdeTotal: number; pedidos: string[];
 }
 
+interface RawOrderItem {
+  pedido: string; codigo: string; sku: string; descricao: string; qtde: number; local: string;
+}
+
 interface ColumnData {
   levels: number;
   addresses: string[]; 
@@ -24,16 +28,11 @@ interface ColumnData {
 
 interface MapElement {
   id: string; name: string; x: number; y: number; w: number; h: number; 
-  baseLevels: number; 
-  color: string;
-  cols: ColumnData[]; 
+  baseLevels: number; color: string; cols: ColumnData[]; 
 }
 
-// NOVO: Tipagem para Multi-Almoxarifados
 interface Almoxarifado {
-  id: string;
-  nome: string;
-  layout: MapElement[];
+  id: string; nome: string; layout: MapElement[];
 }
 
 // ============================================================================
@@ -55,7 +54,6 @@ const DEFAULT_LAYOUT: MapElement[] = [
 
 const COLORS = ['bg-orange-500', 'bg-red-500', 'bg-red-600', 'bg-yellow-500', 'bg-green-600', 'bg-sky-500', 'bg-blue-600', 'bg-purple-600', 'bg-pink-500', 'bg-stone-700', 'bg-stone-500'];
 
-// Fallback das zonas de roteamento (para a linha do chão)
 const ZONES = {
   CENTRAL_DIREITA: ["1-A", "1-B", "1-C", "1-D", "1-E", "P12", "P13"],
   CENTRAL_ESQUERDA: ["2-A", "2-B", "2-C", "2-D", "P11", "P10"],
@@ -65,7 +63,8 @@ const ZONES = {
   CORR_ESQUERDA: ["P15", "P16", "P17", "P25"],
   CORR_FUNDO: ["P18", "P19", "P20"],
   CORR_DIREITA: ["P21", "P22", "GELADEIRA"],
-  CORR_CENTRAL: ["P23", "P24"]
+  CORR_CENTRAL: ["P23", "P24"],
+  CORREDOR_PRINCIPAL: ["CORREDOR"] 
 };
 
 // ============================================================================
@@ -95,6 +94,7 @@ const getBestLocationInfo = (localStr: string) => {
 
       switch(foundZone) {
         case 'CENTRAL_DIREITA': score = 10000 + (ratio * 1000); pCoord = { x: 340, y: 500 - ratio * 360 }; sCoord = { x: 260, y: 500 - ratio * 360 }; break;
+        case 'CORREDOR_PRINCIPAL': score = 15000; pCoord = { x: 340, y: 320 }; sCoord = { x: 340, y: 320 }; break;
         case 'CORR_PORTA': score = 21000 + (ratio * 1000); pCoord = { x: 480, y: 120 - ratio * 100 }; sCoord = { x: 455, y: 120 - ratio * 100 }; break;
         case 'CORR_ESQUERDA': score = 22000 + (ratio * 1000); pCoord = { x: 480 + ratio * 240, y: 50 }; sCoord = { x: 480 + ratio * 240, y: 15 }; break;
         case 'CORR_FUNDO': score = 23000 + (ratio * 1000); pCoord = { x: 720, y: 50 + ratio * 120 }; sCoord = { x: 765, y: 50 + ratio * 120 }; break;
@@ -153,11 +153,19 @@ export default function WMS() {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<'operation' | 'builder'>('operation');
   
+  // Controle de Visão (Coleta Batch vs Montagem de Pedidos)
+  const [listViewMode, setListViewMode] = useState<'picking' | 'orders'>('picking');
+
   // Operação
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  // Listas Salvas
   const [pickingList, setPickingList] = useState<PickItem[]>(() => { const saved = localStorage.getItem("wms_picking_list"); return saved ? JSON.parse(saved) : []; });
   const [checkedItems, setCheckedItems] = useState<number[]>(() => { const saved = localStorage.getItem("wms_checked_items"); return saved ? JSON.parse(saved) : []; });
+  const [rawOrderItems, setRawOrderItems] = useState<RawOrderItem[]>(() => { const saved = localStorage.getItem("wms_raw_orders"); return saved ? JSON.parse(saved) : []; });
+  const [packedItems, setPackedItems] = useState<string[]>(() => { const saved = localStorage.getItem("wms_packed_items"); return saved ? JSON.parse(saved) : []; });
+  
   const [activePin, setActivePin] = useState<number | null>(null);
 
   // Câmera 3D Livre
@@ -165,7 +173,7 @@ export default function WMS() {
   const [isCamDragging, setIsCamDragging] = useState(false);
   const [camStart, setCamStart] = useState({ x: 0, y: 0 });
 
-  // NOVO: Construtor Multi-Almoxarifados com Migrator
+  // Construtor Multi-Almoxarifados
   const [almoxarifados, setAlmoxarifados] = useState<Almoxarifado[]>(() => {
     const saved = localStorage.getItem("wms_custom_layout"); 
     if (saved) {
@@ -173,23 +181,17 @@ export default function WMS() {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0 && !('layout' in parsed[0])) {
           const migratedLayout = parsed.map((el: any) => ({
-            ...el,
-            baseLevels: el.baseLevels || el.levels || 1,
-            cols: el.cols || createCols(el.columns || 1, el.levels || 1, el.levelAddresses || [])
+            ...el, baseLevels: el.baseLevels || el.levels || 1, cols: el.cols || createCols(el.columns || 1, el.levels || 1, el.levelAddresses || [])
           }));
           return [{ id: 'almox-1', nome: 'Almoxarifado Principal', layout: migratedLayout }];
         }
         return parsed;
-      } catch(e) {
-        return [{ id: 'almox-1', nome: 'Almoxarifado Principal', layout: DEFAULT_LAYOUT }];
-      }
+      } catch(e) { return [{ id: 'almox-1', nome: 'Almoxarifado Principal', layout: DEFAULT_LAYOUT }]; }
     }
     return [{ id: 'almox-1', nome: 'Almoxarifado Principal', layout: DEFAULT_LAYOUT }]; 
   });
   
   const [activeAlmoxId, setActiveAlmoxId] = useState<string>(almoxarifados[0]?.id || 'almox-1');
-
-  // Variáveis Derivadas do Almoxarifado Ativo
   const activeAlmox = almoxarifados.find(a => a.id === activeAlmoxId) || almoxarifados[0];
   const elements = activeAlmox?.layout || [];
 
@@ -206,20 +208,13 @@ export default function WMS() {
     }));
   };
 
-  // ============================================================================
-  // Integração SaaS (Carregamento e Salvamento via Supabase)
-  // ============================================================================
+  // Integração SaaS
   useEffect(() => {
     async function loadLayoutFromDB() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      const { data, error } = await supabase
-        .from('configuracoes_empresa')
-        .select('wms_layout')
-        .eq('user_id', session.user.id)
-        .maybeSingle();
-
+      const { data } = await supabase.from('configuracoes_empresa').select('wms_layout').eq('user_id', session.user.id).maybeSingle();
       if (data?.wms_layout && Array.isArray(data.wms_layout)) {
         try {
           const parsed = data.wms_layout;
@@ -228,32 +223,42 @@ export default function WMS() {
               ...el, baseLevels: el.baseLevels || el.levels || 1, cols: el.cols || createCols(el.columns || 1, el.levels || 1, el.levelAddresses || [])
             }));
             setAlmoxarifados([{ id: 'almox-1', nome: 'Almoxarifado Principal', layout: migratedLayout }]);
-          } else {
-            setAlmoxarifados(parsed);
-          }
-        } catch (e) { console.error("Erro ao processar layout da nuvem", e); }
+          } else { setAlmoxarifados(parsed); }
+        } catch (e) { console.error("Erro", e); }
       }
     }
     loadLayoutFromDB();
   }, []);
 
   useEffect(() => {
+    // 1. Salva no Storage local sempre (funciona até sem internet)
     localStorage.setItem("wms_picking_list", JSON.stringify(pickingList));
     localStorage.setItem("wms_checked_items", JSON.stringify(checkedItems));
+    localStorage.setItem("wms_raw_orders", JSON.stringify(rawOrderItems));
+    localStorage.setItem("wms_packed_items", JSON.stringify(packedItems));
     localStorage.setItem("wms_custom_layout", JSON.stringify(almoxarifados));
 
+    // 2. Sincroniza com a nuvem (Supabase) de forma segura
     const timeoutId = setTimeout(async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        await supabase
-          .from('configuracoes_empresa')
-          .update({ wms_layout: almoxarifados })
-          .eq('user_id', session.user.id);
+      try {
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        if (session && !sessionError) {
+          const { error } = await supabase
+            .from('configuracoes_empresa')
+            .update({ wms_layout: almoxarifados })
+            .eq('user_id', session.user.id);
+            
+          if (error) {
+            console.warn("Aviso (Supabase): Falha ao atualizar layout na nuvem.", error.message);
+          }
+        }
+      } catch (err) {
+        console.warn("Aviso (Rede/CORS): A requisição para o Supabase foi bloqueada.", err);
       }
     }, 1500); 
 
     return () => clearTimeout(timeoutId);
-  }, [pickingList, checkedItems, almoxarifados]);
+  }, [pickingList, checkedItems, rawOrderItems, packedItems, almoxarifados]);
 
 
   const handleCamMouseDown = (e: React.MouseEvent) => { setIsCamDragging(true); setCamStart({ x: e.clientX, y: e.clientY }); };
@@ -277,13 +282,23 @@ export default function WMS() {
       parsedElements.forEach(e => { if (!rowsByTop[e.top]) rowsByTop[e.top] = []; rowsByTop[e.top].push(e); });
       const sortedTops = Object.keys(rowsByTop).map(Number).sort((a, b) => a - b);
 
-      let currentPedido = ""; let lastParsedItem: any = null; const rawItems: any[] = [];
+      let currentPedido = ""; 
+      let lastParsedItem: any = null; 
+      const rawItems: any[] = [];
+      const pedidosAtendidos = new Set<string>();
+
       sortedTops.forEach(top => {
         const rowElements = rowsByTop[top].sort((a, b) => a.left - b.left);
         const texts = rowElements.map(e => e.text);
-        if (texts[0].startsWith('PEDIDO:')) currentPedido = texts[0].replace('PEDIDO:', '').trim();
-        else if (texts[0].startsWith('LOCAL:')) { if (lastParsedItem) lastParsedItem.local = texts[0].replace('LOCAL:', '').trim(); } 
-        else if (texts.length >= 7 && (texts[6] === 'SIM' || texts[6] === 'NAO' || texts[6] === 'NÃO')) {
+        const rowString = texts.join(' ').replace(/\s+/g, ' ').toUpperCase(); 
+        
+        if (texts[0].startsWith('PEDIDO:')) {
+            currentPedido = texts[0].replace('PEDIDO:', '').trim();
+        } else if (texts[0].startsWith('LOCAL:')) { 
+            if (lastParsedItem) lastParsedItem.local = texts[0].replace('LOCAL:', '').trim(); 
+        } else if (rowString.includes('PEDIDO ATENDIDO') && !rowString.includes('NÃO ATENDIDO') && !rowString.includes('NAO ATENDIDO')) {
+            pedidosAtendidos.add(currentPedido);
+        } else if (texts.length >= 7 && (texts[6] === 'SIM' || texts[6] === 'NAO' || texts[6] === 'NÃO')) {
           const qtde = parseFloat(texts[4].replace(/\./g, '').replace(',', '.')); 
           const item = { pedido: currentPedido, codigo: texts[0], sku: texts[1], descricao: texts[2], qtde: qtde, atendido: texts[6] === 'SIM', local: "Sem Local" };
           lastParsedItem = item; rawItems.push(item);
@@ -293,7 +308,13 @@ export default function WMS() {
       const batchMap: Record<string, PickItem> = {};
       const unknownLocations = new Set<string>();
 
-      rawItems.filter(item => item.atendido).forEach(item => {
+      // Filtra os itens mantendo apenas os de pedidos que foram totalmente atendidos
+      const validRawItems = rawItems.filter(item => item.atendido && pedidosAtendidos.has(item.pedido));
+      
+      // Salva a lista de pedidos puros para a visão de Montagem de Pedidos (Packing)
+      setRawOrderItems(validRawItems);
+
+      validRawItems.forEach(item => {
           if (!batchMap[item.codigo]) { batchMap[item.codigo] = { codigo: item.codigo, sku: item.sku, descricao: item.descricao, local: item.local, qtdeTotal: 0, pedidos: [] }; }
           batchMap[item.codigo].qtdeTotal += item.qtde;
           if (!batchMap[item.codigo].pedidos.includes(item.pedido)) batchMap[item.codigo].pedidos.push(item.pedido);
@@ -318,15 +339,15 @@ export default function WMS() {
       });
 
       const validItems: PickItem[] = [];
-      Object.values(batchMap).forEach(item => { if (getBestLocationInfo(item.local).isValid) validItems.push(item); });
+      Object.values(batchMap).forEach(item => { validItems.push(item); });
       const finalList = validItems.sort((a, b) => getBestLocationInfo(a.local).score - getBestLocationInfo(b.local).score);
 
-      setPickingList(finalList); setCheckedItems([]); setActivePin(null);
+      setPickingList(finalList); setCheckedItems([]); setPackedItems([]); setActivePin(null); setListViewMode('picking');
       toast({ title: `Rota Gerada: ${activeAlmox.nome}`, description: `${finalList.length} SKUs encontrados para esta separação.` });
 
       if (unknownLocations.size > 0) {
         setTimeout(() => {
-          toast({ variant: "destructive", title: "Atenção: Endereços não mapeados!", description: `Excluídos da rota: ${Array.from(unknownLocations).join(' | ')}`, duration: 9999999 });
+          toast({ variant: "destructive", title: "Atenção: Endereços não mapeados!", description: `Alguns itens ficarão sem posição no 3D, mas continuam na lista: ${Array.from(unknownLocations).join(' | ')}`, duration: 9999999 });
         }, 800); 
       }
     } catch (error) {
@@ -335,39 +356,33 @@ export default function WMS() {
   };
 
   const resetList = () => {
-    setPickingList([]); setCheckedItems([]); setActivePin(null); setFile(null);
-    localStorage.removeItem("wms_picking_list"); localStorage.removeItem("wms_checked_items");
+    setPickingList([]); setCheckedItems([]); setRawOrderItems([]); setPackedItems([]); setActivePin(null); setFile(null); setListViewMode('picking');
+    localStorage.removeItem("wms_picking_list"); localStorage.removeItem("wms_checked_items"); localStorage.removeItem("wms_raw_orders"); localStorage.removeItem("wms_packed_items");
   };
 
   const handleToggleCheck = (idx: number, e: React.MouseEvent) => { e.stopPropagation(); setCheckedItems(prev => prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]); };
+  const handleTogglePacked = (packKey: string) => { setPackedItems(prev => prev.includes(packKey) ? prev.filter(k => k !== packKey) : [...prev, packKey]); };
   const handleMapClick = () => { if (activePin !== null) setActivePin(null); };
+
+  // Agrupamento para a visão de Montagem de Pedidos
+  const groupedOrders = rawOrderItems.reduce((acc, item) => {
+    if(!acc[item.pedido]) acc[item.pedido] = [];
+    acc[item.pedido].push(item);
+    return acc;
+  }, {} as Record<string, RawOrderItem[]>);
 
   const handleCriarAlmoxarifado = () => {
     const newId = `almox-${Date.now()}`;
     const novo: Almoxarifado = { id: newId, nome: `Novo Galpão ${almoxarifados.length + 1}`, layout: [] };
-    setAlmoxarifados([...almoxarifados, novo]);
-    setActiveAlmoxId(newId);
-    setSelectedEl(null);
+    setAlmoxarifados([...almoxarifados, novo]); setActiveAlmoxId(newId); setSelectedEl(null);
   };
-
   const handleExcluirAlmoxarifado = () => {
-    if (almoxarifados.length <= 1) {
-      toast({ variant: "destructive", title: "Ação não permitida", description: "Você precisa ter pelo menos um almoxarifado." });
-      return;
-    }
+    if (almoxarifados.length <= 1) { toast({ variant: "destructive", title: "Ação não permitida", description: "Você precisa ter pelo menos um almoxarifado." }); return; }
     if (confirm(`Tem certeza que deseja excluir o ${activeAlmox.nome}? O mapa será perdido.`)) {
-      const novaLista = almoxarifados.filter(a => a.id !== activeAlmoxId);
-      setAlmoxarifados(novaLista);
-      setActiveAlmoxId(novaLista[0].id);
-      setSelectedEl(null);
+      const novaLista = almoxarifados.filter(a => a.id !== activeAlmoxId); setAlmoxarifados(novaLista); setActiveAlmoxId(novaLista[0].id); setSelectedEl(null);
     }
   };
-
-  const handleRenomearAlmoxarifado = (novoNome: string) => {
-    setAlmoxarifados(prev => prev.map(a => a.id === activeAlmoxId ? { ...a, nome: novoNome } : a));
-  };
-
-
+  const handleRenomearAlmoxarifado = (novoNome: string) => { setAlmoxarifados(prev => prev.map(a => a.id === activeAlmoxId ? { ...a, nome: novoNome } : a)); };
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
     if (!dragging) return;
     const dx = e.clientX - dragging.startX; const dy = e.clientY - dragging.startY;
@@ -376,68 +391,52 @@ export default function WMS() {
     updateActiveLayout(prev => prev.map(el => el.id === dragging.id ? { ...el, x: newX, y: newY } : el));
   };
   const handleCanvasMouseUp = () => setDragging(null);
-  
   const addNewElement = () => {
     const newEl: MapElement = { id: Date.now().toString(), name: 'NOVA GÔNDOLA', x: 350, y: 250, w: 100, h: 60, baseLevels: 4, color: 'bg-stone-500', cols: createCols(2, 4) };
     updateActiveLayout([...elements, newEl]); setSelectedEl(newEl.id);
   };
-  
   const deleteElement = (id: string) => { updateActiveLayout(elements.filter(e => e.id !== id)); if (selectedEl === id) setSelectedEl(null); };
-  
   const updateSelected = (key: keyof MapElement, value: any) => {
-    if (!selectedEl) return; 
-    updateActiveLayout(prev => prev.map(el => el.id === selectedEl ? { ...el, [key]: value } : el));
+    if (!selectedEl) return; updateActiveLayout(prev => prev.map(el => el.id === selectedEl ? { ...el, [key]: value } : el));
   };
-
   const updateColumnsAmount = (amount: number) => {
     if (!selectedEl || amount < 1) return;
     updateActiveLayout(prev => prev.map(el => {
       if (el.id !== selectedEl) return el;
       const newCols = [...(el.cols || [])];
-      if (amount > newCols.length) {
-        while(newCols.length < amount) newCols.push({ levels: el.baseLevels || 1, addresses: Array(el.baseLevels || 1).fill("") });
-      } else { newCols.splice(amount); }
+      if (amount > newCols.length) { while(newCols.length < amount) newCols.push({ levels: el.baseLevels || 1, addresses: Array(el.baseLevels || 1).fill("") }); } 
+      else { newCols.splice(amount); }
       return { ...el, cols: newCols };
     }));
   };
-
   const updateColLevels = (colIdx: number, levels: number) => {
     if (!selectedEl || levels < 1) return;
     updateActiveLayout(prev => prev.map(el => {
       if (el.id !== selectedEl) return el;
-      const newCols = [...(el.cols || [])];
-      const newAddresses = [...newCols[colIdx].addresses];
-      if (levels > newAddresses.length) {
-        while(newAddresses.length < levels) newAddresses.push("");
-      } else { newAddresses.splice(levels); }
+      const newCols = [...(el.cols || [])]; const newAddresses = [...newCols[colIdx].addresses];
+      if (levels > newAddresses.length) { while(newAddresses.length < levels) newAddresses.push(""); } 
+      else { newAddresses.splice(levels); }
       newCols[colIdx] = { ...newCols[colIdx], levels, addresses: newAddresses };
       return { ...el, cols: newCols };
     }));
   };
-
   const updateColAddress = (colIdx: number, levelIdx: number, val: string) => {
     if (!selectedEl) return;
     updateActiveLayout(prev => prev.map(el => {
       if (el.id !== selectedEl) return el;
-      const newCols = [...(el.cols || [])];
-      const newAddresses = [...newCols[colIdx].addresses];
-      newAddresses[levelIdx] = val;
-      newCols[colIdx] = { ...newCols[colIdx], addresses: newAddresses };
-      return { ...el, cols: newCols };
+      const newCols = [...(el.cols || [])]; const newAddresses = [...newCols[colIdx].addresses]; newAddresses[levelIdx] = val;
+      newCols[colIdx] = { ...newCols[colIdx], addresses: newAddresses }; return { ...el, cols: newCols };
     }));
   };
 
   const fullOrthogonalPath: {x: number, y: number}[] = [{ x: 340, y: 580 }]; 
-  
   const visualPins = pickingList.map((item) => {
     const info = getBestLocationInfo(item.local);
     const curr = fullOrthogonalPath[fullOrthogonalPath.length - 1];
     fullOrthogonalPath.push(...buildPath(curr, info.pathCoord)); fullOrthogonalPath.push(info.pathCoord);
 
     const prefixes = item.local.split('/').map(s => s.replace(/\s+/g, '').toUpperCase());
-    let foundEl: MapElement | null = null;
-    let foundColIndex = -1;
-    let foundLevelIndex = -1;
+    let foundEl: MapElement | null = null; let foundColIndex = -1; let foundLevelIndex = -1;
 
     for (const el of elements) {
       if (!el.cols) continue;
@@ -445,11 +444,7 @@ export default function WMS() {
         const colData = el.cols[c];
         for (let l = 0; l < colData.levels; l++) {
           const addrs = (colData.addresses[l] || "").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-          for (const prefix of prefixes) {
-            if (addrs.some(a => prefix.startsWith(a))) {
-              foundEl = el; foundColIndex = c; foundLevelIndex = l; break;
-            }
-          }
+          for (const prefix of prefixes) { if (addrs.some(a => prefix.startsWith(a))) { foundEl = el; foundColIndex = c; foundLevelIndex = l; break; } }
           if (foundEl) break;
         }
         if (foundEl) break;
@@ -871,48 +866,118 @@ export default function WMS() {
             </CardContent>
           </Card>
 
-          {/* TABELA DE ROTA GERADA */}
+          {/* ÁREA DA TABELA (COM CONTROLE DE VISÃO: COLETA x MONTAGEM) */}
           {pickingList.length > 0 && (
             <Card className="shadow-sm border-stone-800 bg-stone-900 lg:col-span-3">
-              <CardHeader className="border-b border-stone-800 bg-stone-950/50">
-                <CardTitle className="text-lg font-heading flex items-center gap-2 text-red-500"><ListChecks className="w-5 h-5 text-red-500" />Lista de Coleta Sequencial</CardTitle>
+              <CardHeader className="border-b border-stone-800 bg-stone-950/50 flex flex-row items-center justify-between">
+                <CardTitle className="text-lg font-heading flex items-center gap-2 text-red-500">
+                  {listViewMode === 'picking' ? <><ListChecks className="w-5 h-5 text-red-500" />Lista de Coleta Sequencial</> : <><Package className="w-5 h-5 text-red-500" />Montagem de Pedidos</>}
+                </CardTitle>
+                <Button 
+                  size="sm"
+                  className={cn("transition-all border-none font-bold", listViewMode === 'picking' ? "bg-stone-800 text-stone-200 hover:bg-stone-700" : "bg-red-600 text-white shadow-md hover:bg-red-700 shadow-red-900/20")}
+                  onClick={() => setListViewMode(prev => prev === 'picking' ? 'orders' : 'picking')}
+                >
+                  {listViewMode === 'picking' ? <><Package className="w-4 h-4 mr-2" /> Montar Pedidos</> : <><ListChecks className="w-4 h-4 mr-2" /> Voltar para Coleta</>}
+                </Button>
               </CardHeader>
               <CardContent className="p-0">
-                <div className="border-t border-stone-800">
-                  <Table>
-                    <TableHeader className="bg-stone-950">
-                      <TableRow className="border-stone-800 hover:bg-transparent">
-                        <TableHead className="w-[80px] text-center text-stone-400">Status</TableHead>
-                        <TableHead className="w-[150px] text-stone-400">Local</TableHead>
-                        <TableHead className="w-[100px] text-stone-400">Código</TableHead>
-                        <TableHead className="w-[120px] text-stone-400">SKU</TableHead>
-                        <TableHead className="text-stone-400">Produto</TableHead>
-                        <TableHead className="text-stone-400">Atende Pedidos</TableHead>
-                        <TableHead className="text-right text-stone-400">Qtd. Coletar</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody className="divide-y divide-stone-800">
-                      {pickingList.map((item, idx) => {
-                        const isChecked = checkedItems.includes(idx);
-                        return (
-                          <TableRow key={idx} className={cn("transition-colors border-stone-800", isChecked ? "bg-green-950/20 hover:bg-green-950/30" : "hover:bg-stone-800/50")}>
-                            <TableCell className="text-center font-bold">
-                              <div onClick={(e) => handleToggleCheck(idx, e)} className={cn("w-7 h-7 rounded-full flex items-center justify-center mx-auto text-xs cursor-pointer transition-all border-2", isChecked ? "bg-green-600 border-green-600 text-white" : "bg-stone-800 border-stone-700 text-stone-400 hover:border-red-500 hover:text-red-500")}>
-                                {isChecked ? <CheckCircle className="w-4 h-4" /> : (idx + 1)}
-                              </div>
-                            </TableCell>
-                            <TableCell><Badge variant="outline" className={cn("font-mono text-sm", isChecked ? "bg-transparent text-stone-500 border-stone-700" : "bg-stone-800 text-stone-300 border-stone-700")}>{item.local}</Badge></TableCell>
-                            <TableCell className={cn("font-mono", isChecked ? "text-stone-600 line-through" : "text-stone-400")}>{item.codigo}</TableCell>
-                            <TableCell className={cn("font-mono font-medium", isChecked ? "text-stone-600 line-through" : "text-red-400")}>{item.sku}</TableCell>
-                            <TableCell className={cn("font-medium", isChecked ? "text-stone-600 line-through" : "text-stone-200")}>{item.descricao}</TableCell>
-                            <TableCell><span className={cn("text-xs", isChecked ? "text-stone-600" : "text-stone-400")}>{item.pedidos.join(', ')}</span></TableCell>
-                            <TableCell className="text-right"><span className={cn("text-lg font-bold", isChecked ? "text-stone-600" : "text-green-500")}>{item.qtdeTotal} un</span></TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
+                
+                {/* VISÃO 1: BATCH PICKING (AGRUPADO POR SKU) */}
+                {listViewMode === 'picking' && (
+                  <div className="border-t border-stone-800">
+                    <Table>
+                      <TableHeader className="bg-stone-950">
+                        <TableRow className="border-stone-800 hover:bg-transparent">
+                          <TableHead className="w-[80px] text-center text-stone-400">Status</TableHead>
+                          <TableHead className="w-[150px] text-stone-400">Local</TableHead>
+                          <TableHead className="w-[100px] text-stone-400">Código</TableHead>
+                          <TableHead className="w-[120px] text-stone-400">SKU</TableHead>
+                          <TableHead className="text-stone-400">Produto</TableHead>
+                          <TableHead className="text-stone-400">Atende Pedidos</TableHead>
+                          <TableHead className="text-right text-stone-400">Qtd. Coletar</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody className="divide-y divide-stone-800">
+                        {pickingList.map((item, idx) => {
+                          const isChecked = checkedItems.includes(idx);
+                          return (
+                            <TableRow key={idx} className={cn("transition-colors border-stone-800", isChecked ? "bg-green-950/20 hover:bg-green-950/30" : "hover:bg-stone-800/50")}>
+                              <TableCell className="text-center font-bold">
+                                <div onClick={(e) => handleToggleCheck(idx, e)} className={cn("w-7 h-7 rounded-full flex items-center justify-center mx-auto text-xs cursor-pointer transition-all border-2", isChecked ? "bg-green-600 border-green-600 text-white" : "bg-stone-800 border-stone-700 text-stone-400 hover:border-red-500 hover:text-red-500")}>
+                                  {isChecked ? <CheckCircle className="w-4 h-4" /> : (idx + 1)}
+                                </div>
+                              </TableCell>
+                              <TableCell><Badge variant="outline" className={cn("font-mono text-sm", isChecked ? "bg-transparent text-stone-500 border-stone-700" : "bg-stone-800 text-stone-300 border-stone-700")}>{item.local}</Badge></TableCell>
+                              <TableCell className={cn("font-mono", isChecked ? "text-stone-600 line-through" : "text-stone-400")}>{item.codigo}</TableCell>
+                              <TableCell className={cn("font-mono font-medium", isChecked ? "text-stone-600 line-through" : "text-red-400")}>{item.sku}</TableCell>
+                              <TableCell className={cn("font-medium", isChecked ? "text-stone-600 line-through" : "text-stone-200")}>{item.descricao}</TableCell>
+                              <TableCell><span className={cn("text-xs", isChecked ? "text-stone-600" : "text-stone-400")}>{item.pedidos.join(', ')}</span></TableCell>
+                              <TableCell className="text-right"><span className={cn("text-lg font-bold", isChecked ? "text-stone-600" : "text-green-500")}>{item.qtdeTotal} un</span></TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+
+                {/* VISÃO 2: PACKING (AGRUPADO POR PEDIDO) */}
+                {listViewMode === 'orders' && (
+                   <div className="p-6 grid grid-cols-1 xl:grid-cols-2 gap-6 bg-stone-900 border-t border-stone-800">
+                      {Object.entries(groupedOrders)
+                         .sort(([pedidoA], [pedidoB]) => Number(pedidoA) - Number(pedidoB))
+                         .map(([pedido, items]) => {
+                         
+                         // Verifica se todos os itens do pedido estão "empacotados"
+                         const isOrderFullyPacked = items.every(i => packedItems.includes(`${pedido}-${i.sku}`));
+
+                         return (
+                         <div key={pedido} className={cn("border rounded-xl overflow-hidden shadow-lg transition-all", isOrderFullyPacked ? "border-green-900/50 bg-green-950/10" : "border-stone-800 bg-stone-950")}>
+                            <div className={cn("px-4 py-3 border-b flex justify-between items-center", isOrderFullyPacked ? "bg-green-950/30 border-green-900/30" : "bg-stone-900 border-stone-800")}>
+                               <div>
+                                 <h4 className={cn("font-bold text-sm", isOrderFullyPacked ? "text-green-500" : "text-stone-200")}>
+                                   Pedido: <span className={cn(isOrderFullyPacked ? "text-green-400" : "text-red-500")}>{pedido}</span>
+                                 </h4>
+                                 {isOrderFullyPacked && <span className="text-[10px] text-green-600 font-bold uppercase tracking-wider">Pronto para faturar</span>}
+                               </div>
+                               <Badge variant="outline" className={cn(isOrderFullyPacked ? "border-green-800 text-green-500" : "border-stone-700 text-stone-400")}>
+                                  {items.length} {items.length === 1 ? 'item' : 'itens'}
+                               </Badge>
+                            </div>
+                            <Table>
+                              <TableHeader>
+                                <TableRow className={cn("hover:bg-transparent", isOrderFullyPacked ? "border-green-900/30" : "border-stone-800")}>
+                                  <TableHead className="w-[50px]"></TableHead>
+                                  <TableHead className="w-[100px] text-stone-500 text-xs">SKU</TableHead>
+                                  <TableHead className="text-stone-500 text-xs">Produto</TableHead>
+                                  <TableHead className="text-right text-stone-500 text-xs">Qtd</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody className={cn(isOrderFullyPacked ? "divide-green-900/20" : "divide-stone-800/50")}>
+                                 {items.map((item, idx) => {
+                                    const packKey = `${pedido}-${item.sku}`;
+                                    const isPacked = packedItems.includes(packKey);
+                                    return (
+                                       <TableRow key={idx} className={cn("transition-colors", isPacked ? "hover:bg-green-900/10" : "hover:bg-stone-800/30", isOrderFullyPacked ? "border-green-900/20" : "border-stone-800")}>
+                                          <TableCell>
+                                             <div onClick={() => handleTogglePacked(packKey)} className={cn("w-5 h-5 rounded flex items-center justify-center cursor-pointer transition-all border", isPacked ? "bg-green-600 border-green-500 text-white" : "bg-stone-900 border-stone-700 text-stone-400 hover:border-red-500")}>
+                                               {isPacked && <Check className="w-3.5 h-3.5" strokeWidth={4} />}
+                                             </div>
+                                          </TableCell>
+                                          <TableCell className={cn("font-mono text-xs", isPacked ? "text-stone-600 line-through" : "text-stone-400")}>{item.sku}</TableCell>
+                                          <TableCell className={cn("text-xs", isPacked ? "text-stone-600 line-through" : "text-stone-300")}>{item.descricao}</TableCell>
+                                          <TableCell className={cn("text-right font-bold", isPacked ? "text-stone-600" : "text-green-500")}>{item.qtde} un</TableCell>
+                                       </TableRow>
+                                    )
+                                 })}
+                              </TableBody>
+                            </Table>
+                         </div>
+                      )})}
+                   </div>
+                )}
+
               </CardContent>
             </Card>
           )}

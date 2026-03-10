@@ -13,12 +13,37 @@ serve(async (req) => {
   try {
     let bodyJson = {};
     try { bodyJson = await req.json(); } catch {}
-    const { action, invoice_number, order_number } = bodyJson as any; // Adicionado order_number
+    
+    // Adicionado trackingCode para a nova funcionalidade de auditoria
+    const { action, invoice_number, order_number, trackingCode } = bodyJson as any; 
 
     const reqHeaders = req.headers;
-    const apiKey = reqHeaders.get('api-key') || Deno.env.get('INTELIPOST_API_KEY');
+    // Tenta pegar do header ou do Deno.env
+    let apiKey = reqHeaders.get('api-key') || Deno.env.get('INTELIPOST_API_KEY');
 
-    if (!apiKey) throw new Error("API Key da Intelipost não fornecida.");
+    // Se ainda não tiver a apiKey, tenta buscar no banco do Supabase baseado no token do usuário
+    if (!apiKey) {
+       const authHeader = req.headers.get('Authorization');
+       if (authHeader) {
+          const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+          const supabase = createClient(
+            Deno.env.get('SUPABASE_URL') ?? '',
+            Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+            { global: { headers: { Authorization: authHeader } } }
+          );
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+             const { data: config } = await supabase
+               .from('configuracoes_empresa')
+               .select('intelipost_token')
+               .eq('user_id', user.id)
+               .single();
+             if (config?.intelipost_token) apiKey = config.intelipost_token;
+          }
+       }
+    }
+
+    if (!apiKey) throw new Error("API Key da Intelipost não fornecida ou não encontrada no banco.");
 
     const intelipostHeaders = {
         'Content-Type': 'application/json',
@@ -30,9 +55,6 @@ serve(async (req) => {
 
     console.log(`[Proxy] Ação: ${action}`);
 
-    // ... (MANTENHA AS AÇÕES GET_SHIPMENTS, SEARCH_BY_INVOICE, TEST_CONNECTION AQUI IGUAIS AO QUE ESTAVAM) ...
-    // Estou omitindo para economizar espaço, mas NÃO APAGUE o código anterior dessas ações.
-    
     // --- AÇÃO 1: Listagem Geral (POST) ---
     if (action === 'GET_SHIPMENTS') {
         const resp = await fetch(`${INTELIPOST_OFFICIAL_URL}shipment_order/search`, {
@@ -80,11 +102,10 @@ serve(async (req) => {
         return new Response(JSON.stringify({ content: { shipments: normalizedContent } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
     
-    // --- NOVA AÇÃO: Buscar Detalhes do Pedido ---
+    // --- AÇÃO 3: Buscar Detalhes do Pedido ---
     if (action === 'GET_SHIPMENT_DETAILS') {
         if (!order_number) throw new Error("Número do Pedido é obrigatório.");
 
-        // Endpoint: /shipment_order/{order_number}
         const endpoint = `shipment_order/${encodeURIComponent(order_number)}`;
         console.log(`Detalhes (GET): ${INTELIPOST_OFFICIAL_URL}${endpoint}`);
 
@@ -102,7 +123,46 @@ serve(async (req) => {
         return new Response(JSON.stringify(data), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    // --- AÇÃO 3: Teste de Conexão ---
+    // --- AÇÃO 4: NOVA AÇÃO PARA A TELA DE AUDITORIA (CRUZAMENTO DE CUSTO) ---
+    if (action === 'GET_ESTIMATIVA') {
+      let endpoint = '';
+      
+      // Tenta pelo código de rastreio primeiro, se não tiver, tenta pelo pedido
+      if (trackingCode && trackingCode !== 'N/A') {
+        endpoint = `shipment_order/tracking_data/${trackingCode}`;
+      } else if (order_number && order_number !== 'N/A') {
+        endpoint = `shipment_order/${order_number}`;
+      } else {
+        return new Response(JSON.stringify({ estimado: 0 }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      console.log(`Buscando Estimativa (GET): ${INTELIPOST_OFFICIAL_URL}${endpoint}`);
+      const response = await fetch(`${INTELIPOST_OFFICIAL_URL}${endpoint}`, { method: 'GET', headers: intelipostHeaders });
+      
+      if (!response.ok) {
+         // Não damos throw error para não quebrar a tabela se um pacote não existir no TMS
+         return new Response(JSON.stringify({ estimado: 0, msg: "Não encontrado no TMS" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      const data = await response.json();
+      let valorEstimado = 0;
+
+      // Pega o custo de envio do provedor dependendo de como a API retornou o objeto
+      if (data && data.content) {
+         if (data.content.provider_shipping_cost !== undefined) {
+             valorEstimado = data.content.provider_shipping_cost;
+         } else if (data.content.shipment_order && data.content.shipment_order.provider_shipping_cost !== undefined) {
+             valorEstimado = data.content.shipment_order.provider_shipping_cost;
+         } else if (data.content.client_shipping_cost !== undefined) {
+             // Fallback para o custo do cliente caso o provedor venha zerado
+             valorEstimado = data.content.client_shipping_cost;
+         }
+      }
+
+      return new Response(JSON.stringify({ estimado: valorEstimado, raw_tms: data.content }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // --- AÇÃO 5: Teste de Conexão ---
     if (action === 'TEST_CONNECTION') {
         const resp = await fetch(`${INTELIPOST_OFFICIAL_URL}info`, { method: 'GET', headers: intelipostHeaders });
         if (!resp.ok) {
