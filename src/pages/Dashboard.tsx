@@ -13,7 +13,8 @@ import {
   Loader2,
   RefreshCw,
   BarChart3,
-  Users
+  Users,
+  Scale
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -25,12 +26,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-
-// Credenciais
-const supabase = createClient(
-  'https://foulnpmrfyuwvqppdrnt.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZvdWxucG1yZnl1d3ZxcHBkcm50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1MDE1NjYsImV4cCI6MjA4NTA3NzU2Nn0.NX3r510aLr4CAROBdFV75VvVjbIz4aj9qEetsF6UQBU'
-);
+import { supabase } from "@/lib/supabase";
 
 export default function Dashboard() {
   const [recentOrders, setRecentOrders] = useState<any[]>([]);
@@ -50,8 +46,12 @@ export default function Dashboard() {
   const [stockAlerts, setStockAlerts] = useState<any[]>([]);
   const [loadingStock, setLoadingStock] = useState(true);
 
+  // ESTADOS DA AUDITORIA DE FRETES
+  const [auditMetrics, setAuditMetrics] = useState<any[]>([]);
+  const [loadingAudit, setLoadingAudit] = useState(true);
+
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
-  const [historyType, setHistoryType] = useState<'orders' | 'revenue' | 'recurrence'>('orders');
+  const [historyType, setHistoryType] = useState<'orders' | 'revenue' | 'recurrence' | 'stock'>('orders');
 
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState("");
@@ -173,6 +173,40 @@ export default function Dashboard() {
     setLoadingStock(false);
   };
 
+  // BUSCAR DADOS DE AUDITORIA (LUCRO/PREJUÍZO)
+  const fetchAuditMetrics = async () => {
+    setLoadingAudit(true);
+    const { data, error } = await supabase
+      .from('auditorias_historico')
+      .select('transportadora, status, divergencia');
+
+    if (!error && data) {
+      const summary: Record<string, { lucro: number, prejuizo: number }> = {};
+      
+      data.forEach((item: any) => {
+        const t = item.transportadora || 'Outros';
+        if (!summary[t]) summary[t] = { lucro: 0, prejuizo: 0 };
+
+        const div = Number(item.divergencia || 0);
+        
+        if (item.status === 'Lucro TMS') {
+          summary[t].lucro += Math.abs(div);
+        } else if (item.status === 'Prejuízo TMS') {
+          summary[t].prejuizo += Math.abs(div);
+        }
+      });
+
+      const formattedArray = Object.entries(summary).map(([name, vals]) => ({
+        transportadora: name,
+        lucro: vals.lucro,
+        prejuizo: vals.prejuizo
+      }));
+
+      setAuditMetrics(formattedArray);
+    }
+    setLoadingAudit(false);
+  };
+
   const handleSync = async (silent = false) => {
     if (!silent) setSyncing(true);
     try {
@@ -180,7 +214,8 @@ export default function Dashboard() {
       await Promise.all([
         fetchRecentOrders(), 
         fetchMonthlyStats(),
-        fetchStockAlerts()
+        fetchStockAlerts(),
+        fetchAuditMetrics()
       ]);
       if (!silent) alert('Dashboard atualizado!');
     } catch (err) { console.error(err); } 
@@ -199,7 +234,7 @@ export default function Dashboard() {
     finally { setLoadingDetails(false); }
   };
 
-  const openHistory = (type: 'orders' | 'revenue' | 'recurrence') => {
+  const openHistory = (type: 'orders' | 'revenue' | 'recurrence' | 'stock') => {
     setHistoryType(type);
     setIsHistoryModalOpen(true);
   };
@@ -208,6 +243,7 @@ export default function Dashboard() {
     fetchRecentOrders();
     fetchMonthlyStats();
     fetchStockAlerts();
+    fetchAuditMetrics();
     const intervalo = setInterval(() => handleSync(true), 60000);
     return () => clearInterval(intervalo);
   }, []);
@@ -223,7 +259,6 @@ export default function Dashboard() {
            <PageHeader title="Dashboard" description="Visão geral das integrações e status do sistema" />
         </div>
         
-        {/* === BOTÃO MODIFICADO AQUI === */}
         <Button 
           onClick={() => handleSync(false)} 
           disabled={syncing} 
@@ -232,15 +267,12 @@ export default function Dashboard() {
           <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
           {syncing ? 'Atualizando...' : 'Atualizar Dados'}
         </Button>
-        {/* ============================= */}
-
       </div>
 
       {/* GRELHA DE CARTÕES DE ESTATÍSTICA */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full">
         
         <div className="w-full min-w-0 cursor-pointer transition-transform hover:-translate-y-1" onClick={() => openHistory('recurrence')}>
-          {/* Cards substituídos para um estilo escuro com bordas sutis */}
           <StatsCard
             title="Recorrência (Total)"
             value={overallRecurringCount.toString()}
@@ -273,21 +305,23 @@ export default function Dashboard() {
           />
         </div>
 
-        <div className="w-full min-w-0">
+        {/* Agora abre o modal de estoque */}
+        <div className="w-full min-w-0 cursor-pointer transition-transform hover:-translate-y-1" onClick={() => openHistory('stock')}>
             <StatsCard
               title="Alerta Estoque"
               value={stockAlerts.length.toString()}
               icon={AlertTriangle}
               variant={stockAlerts.length > 0 ? "warning" : "primary"}
               trend={{ }} 
-              className="bg-stone-900 border-stone-800 text-stone-100 h-full w-full shadow-sm border-l-2 border-l-red-600"
+              className="bg-stone-900 border-stone-800 text-stone-100 h-full w-full shadow-sm hover:border-red-600/50 transition-colors border-l-2 border-l-red-600"
             />
         </div>
       </div>
 
-      {/* GRELHA INFERIOR: ÚLTIMOS PEDIDOS E ALERTA ESTOQUE */}
+      {/* GRELHA INFERIOR: ÚLTIMOS PEDIDOS E AUDITORIA DE FRETES */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 w-full">
         
+        {/* ÚLTIMOS PEDIDOS */}
         <Card className="shadow-sm bg-stone-900 border-stone-800 flex flex-col h-full overflow-hidden w-full min-w-0 text-stone-200">
           <CardHeader className="flex flex-row items-center justify-between pb-2 bg-stone-950/50 flex-wrap gap-2 border-b border-stone-800">
             <div className="min-w-0 flex-1">
@@ -320,42 +354,48 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
+        {/* AUDITORIA DE FRETES (NOVO) */}
         <Card className="shadow-sm bg-stone-900 border-stone-800 flex flex-col h-full overflow-hidden w-full min-w-0 text-stone-200">
           <CardHeader className="flex flex-row items-center justify-between pb-2 bg-stone-950/50 flex-wrap gap-2 border-b border-stone-800">
-            <CardTitle className="text-base sm:text-lg font-heading truncate flex-1 min-w-0 text-stone-100">Alerta de Estoque</CardTitle>
+            <div className="min-w-0 flex-1">
+              <CardTitle className="text-base sm:text-lg font-heading truncate flex items-center gap-2 text-stone-100">
+                 <Scale className="w-5 h-5 text-emerald-500" /> Auditoria de Fretes
+              </CardTitle>
+              <CardDescription className="text-xs sm:text-sm truncate text-stone-400">Lucro e Prejuízo por Transportadora</CardDescription>
+            </div>
             <Button variant="ghost" size="sm" asChild className="flex-shrink-0 hover:bg-stone-800">
-                <Link to="/estoque" className="text-red-500 hover:text-red-400 text-xs sm:text-sm px-0 sm:px-3">
-                    Ver todos <ArrowRight className="w-3 h-3 sm:w-4 sm:h-4 ml-1" />
+                <Link to="/auditoria" className="text-emerald-500 hover:text-emerald-400 text-xs sm:text-sm px-0 sm:px-3">
+                    Módulo completo <ArrowRight className="w-3 h-3 sm:w-4 sm:h-4 ml-1" />
                 </Link>
             </Button>
           </CardHeader>
           <CardContent className="pt-4 px-3 sm:px-6">
-            <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1 sm:pr-2 custom-scrollbar">
-              {loadingStock ? (
-                <div className="flex justify-center py-4 text-stone-500"><Loader2 className="w-6 h-6 animate-spin" /></div>
-              ) : stockAlerts.length > 0 ? (
-                stockAlerts.map((item) => (
-                  <div key={item.sku} className="flex items-center justify-between p-3 rounded-lg bg-red-950/20 border border-red-900/30 gap-2">
-                    <div className="overflow-hidden min-w-0 flex-1">
-                      <p className="font-medium text-sm text-red-400 truncate" title={item.nome}>
-                        {item.nome || "Produto sem nome"}
-                      </p>
-                      <p className="text-xs text-red-500/70 font-mono truncate">{item.sku}</p>
+            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1 sm:pr-2 custom-scrollbar">
+              {loadingAudit ? (
+                <div className="flex justify-center py-8 text-stone-500"><Loader2 className="w-6 h-6 animate-spin" /></div>
+              ) : auditMetrics.length > 0 ? (
+                auditMetrics.map((metric) => (
+                  <div key={metric.transportadora} className="flex items-center justify-between p-4 rounded-lg bg-stone-950 border border-stone-800 gap-2 hover:bg-stone-950/80 transition-colors">
+                    <div className="flex items-center gap-3">
+                       <Truck className="w-8 h-8 text-stone-600" />
+                       <p className="font-bold text-sm text-stone-200 uppercase tracking-wider">{metric.transportadora}</p>
                     </div>
-                    <div className="text-right flex-shrink-0 w-[65px] sm:w-[80px]">
-                      <p className="font-bold text-sm text-red-500 truncate">
-                        {item.estoque} un
-                      </p>
-                      <p className="text-[10px] sm:text-xs text-red-600 font-semibold truncate">
-                        Mín: {item.qtyminstock}
-                      </p>
+                    <div className="text-right flex-shrink-0 space-y-1">
+                      <div className="flex items-center justify-end gap-2 text-xs">
+                         <span className="text-stone-500 font-medium">Lucro:</span>
+                         <span className="font-bold text-emerald-400">+{metric.lucro.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span>
+                      </div>
+                      <div className="flex items-center justify-end gap-2 text-xs">
+                         <span className="text-stone-500 font-medium">Prejuízo:</span>
+                         <span className="font-bold text-red-400">-{metric.prejuizo.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span>
+                      </div>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="text-center py-6 text-stone-500 bg-stone-950/50 rounded-lg border border-dashed border-stone-800">
-                  <Package className="w-8 h-8 mx-auto mb-2 opacity-20" />
-                  <p className="text-sm">Nenhum produto com estoque crítico.</p>
+                <div className="text-center py-8 text-stone-500 bg-stone-950/50 rounded-lg border border-dashed border-stone-800">
+                  <Scale className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                  <p className="text-sm">Nenhuma divergência registrada.</p>
                 </div>
               )}
             </div>
@@ -371,11 +411,13 @@ export default function Dashboard() {
               {historyType === 'orders' && <><Package className="h-5 w-5 text-red-500" /> Histórico de Volume de Pedidos</>}
               {historyType === 'revenue' && <><BarChart3 className="h-5 w-5 text-red-500" /> Histórico de Faturamento</>}
               {historyType === 'recurrence' && <><Users className="h-5 w-5 text-red-500" /> Clientes Recorrentes</>}
+              {historyType === 'stock' && <><AlertTriangle className="h-5 w-5 text-red-500" /> Alerta de Estoque Crítico</>}
             </DialogTitle>
             <DialogDescription className="text-stone-400">
               {historyType === 'orders' && "Quantidade de pedidos recebidos nos últimos 12 meses."}
               {historyType === 'revenue' && "Valores faturados (exclui pendentes e cancelados) nos últimos 12 meses."}
               {historyType === 'recurrence' && "Clientes que possuem mais de 1 compra faturada no período selecionado."}
+              {historyType === 'stock' && "Produtos com o nível de estoque atual abaixo do mínimo recomendado."}
             </DialogDescription>
           </DialogHeader>
           
@@ -394,65 +436,99 @@ export default function Dashboard() {
             </div>
           )}
 
-          <div className="mt-4 border border-stone-800 rounded-lg overflow-x-auto max-h-[300px] overflow-y-auto">
-             <table className="w-full text-sm min-w-[350px]">
-                <thead className="bg-stone-950 text-stone-400 sticky top-0">
-                  <tr>
-                    {historyType === 'recurrence' ? (
-                      <>
-                        <th className="px-4 py-3 text-left font-semibold">Nome do Cliente</th>
-                        <th className="px-4 py-3 text-center font-semibold">Nº de Compras</th>
-                        <th className="px-4 py-3 text-right font-semibold">Total Gasto</th>
-                      </>
+          <div className={`mt-4 ${historyType !== 'stock' ? 'border border-stone-800 rounded-lg overflow-x-auto' : ''} max-h-[350px] overflow-y-auto custom-scrollbar`}>
+             {historyType === 'stock' ? (
+                // RENDERIZAÇÃO DO MODAL DE ESTOQUE
+                <div className="space-y-3 pr-2">
+                  {loadingStock ? (
+                    <div className="flex justify-center py-4 text-stone-500"><Loader2 className="w-6 h-6 animate-spin" /></div>
+                  ) : stockAlerts.length > 0 ? (
+                    stockAlerts.map((item) => (
+                      <div key={item.sku} className="flex items-center justify-between p-3 rounded-lg bg-red-950/20 border border-red-900/30 gap-2">
+                        <div className="overflow-hidden min-w-0 flex-1">
+                          <p className="font-medium text-sm text-red-400 truncate" title={item.nome}>
+                            {item.nome || "Produto sem nome"}
+                          </p>
+                          <p className="text-xs text-red-500/70 font-mono truncate">{item.sku}</p>
+                        </div>
+                        <div className="text-right flex-shrink-0 w-[65px] sm:w-[80px]">
+                          <p className="font-bold text-sm text-red-500 truncate">
+                            {item.estoque} un
+                          </p>
+                          <p className="text-[10px] sm:text-xs text-red-600 font-semibold truncate">
+                            Mín: {item.qtyminstock}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center py-6 text-stone-500 bg-stone-950/50 rounded-lg border border-dashed border-stone-800">
+                      <Package className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                      <p className="text-sm">Nenhum produto com estoque crítico.</p>
+                    </div>
+                  )}
+                </div>
+             ) : (
+               // RENDERIZAÇÃO DAS TABELAS ORIGINAIS (PEDIDOS, RECEITA, RECORRÊNCIA)
+               <table className="w-full text-sm min-w-[350px]">
+                  <thead className="bg-stone-950 text-stone-400 sticky top-0">
+                    <tr>
+                      {historyType === 'recurrence' ? (
+                        <>
+                          <th className="px-4 py-3 text-left font-semibold">Nome do Cliente</th>
+                          <th className="px-4 py-3 text-center font-semibold">Nº de Compras</th>
+                          <th className="px-4 py-3 text-right font-semibold">Total Gasto</th>
+                        </>
+                      ) : (
+                        <>
+                          <th className="px-4 py-3 text-left font-semibold">Mês/Ano</th>
+                          {historyType === 'orders' && <th className="px-4 py-3 text-center font-semibold">Qtde Pedidos</th>}
+                          {historyType === 'revenue' && <th className="px-4 py-3 text-right font-semibold">Valor Total</th>}
+                        </>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-800">
+                    {loadingHistory ? (
+                      <tr><td colSpan={3} className="p-4 text-center text-stone-500">Carregando dados...</td></tr>
+                    ) : historyType === 'recurrence' ? (
+                      currentRecurrenceData.length > 0 ? (
+                        currentRecurrenceData.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-stone-800/50">
+                            <td className="px-4 py-3 capitalize">{item.name.toLowerCase()}</td>
+                            <td className="px-4 py-3 text-center">
+                              <span className="bg-red-950/50 px-2.5 py-0.5 rounded-full text-xs font-bold text-red-400 border border-red-900/30">
+                                {item.count}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right font-medium text-stone-200">
+                              {item.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr><td colSpan={3} className="p-4 text-center text-stone-500">Nenhum cliente recorrente encontrado.</td></tr>
+                      )
                     ) : (
-                      <>
-                        <th className="px-4 py-3 text-left font-semibold">Mês/Ano</th>
-                        {historyType === 'orders' && <th className="px-4 py-3 text-center font-semibold">Qtde Pedidos</th>}
-                        {historyType === 'revenue' && <th className="px-4 py-3 text-right font-semibold">Valor Total</th>}
-                      </>
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-800">
-                  {loadingHistory ? (
-                    <tr><td colSpan={3} className="p-4 text-center text-stone-500">Carregando dados...</td></tr>
-                  ) : historyType === 'recurrence' ? (
-                    currentRecurrenceData.length > 0 ? (
-                      currentRecurrenceData.map((item, idx) => (
-                        <tr key={idx} className="hover:bg-stone-800/50">
-                          <td className="px-4 py-3 capitalize">{item.name.toLowerCase()}</td>
-                          <td className="px-4 py-3 text-center">
-                            <span className="bg-red-950/50 px-2.5 py-0.5 rounded-full text-xs font-bold text-red-400 border border-red-900/30">
-                              {item.count}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right font-medium text-stone-200">
-                            {item.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-                          </td>
+                      historyData.map((item, idx) => (
+                        <tr key={idx} className={`hover:bg-stone-800/50 ${idx === 0 ? 'bg-stone-800/20 font-medium' : ''}`}>
+                          <td className="px-4 py-3 capitalize">{item.month}</td>
+                          {historyType === 'orders' && (
+                            <td className="px-4 py-3 text-center">
+                              <span className="bg-stone-800 px-2.5 py-0.5 rounded-full text-xs font-bold text-stone-300">{item.count}</span>
+                            </td>
+                          )}
+                          {historyType === 'revenue' && (
+                            <td className="px-4 py-3 text-right font-medium text-stone-200">
+                              {item.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                            </td>
+                          )}
                         </tr>
                       ))
-                    ) : (
-                      <tr><td colSpan={3} className="p-4 text-center text-stone-500">Nenhum cliente recorrente encontrado.</td></tr>
-                    )
-                  ) : (
-                    historyData.map((item, idx) => (
-                      <tr key={idx} className={`hover:bg-stone-800/50 ${idx === 0 ? 'bg-stone-800/20 font-medium' : ''}`}>
-                        <td className="px-4 py-3 capitalize">{item.month}</td>
-                        {historyType === 'orders' && (
-                          <td className="px-4 py-3 text-center">
-                            <span className="bg-stone-800 px-2.5 py-0.5 rounded-full text-xs font-bold text-stone-300">{item.count}</span>
-                          </td>
-                        )}
-                        {historyType === 'revenue' && (
-                          <td className="px-4 py-3 text-right font-medium text-stone-200">
-                            {item.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-                          </td>
-                        )}
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-             </table>
+                    )}
+                  </tbody>
+               </table>
+             )}
           </div>
         </DialogContent>
       </Dialog>
@@ -478,7 +554,7 @@ export default function Dashboard() {
                   </div>
                </div>
                
-               <div className="border border-stone-800 rounded-lg overflow-x-auto max-h-[200px] overflow-y-auto">
+               <div className="border border-stone-800 rounded-lg overflow-x-auto max-h-[200px] overflow-y-auto custom-scrollbar">
                   <table className="w-full text-sm min-w-[400px]">
                     <thead className="bg-stone-950 text-stone-400 sticky top-0">
                       <tr><th className="px-3 py-2 text-left font-semibold">Produto</th><th className="px-3 py-2 text-center font-semibold">Qtd</th><th className="px-3 py-2 text-right font-semibold">Total</th></tr>
@@ -497,7 +573,6 @@ export default function Dashboard() {
 }
 
 function StatusBadgeDashboard({ status }: { status: string }) {
-  // Cores atualizadas para combinar com o tema escuro/pedra, mantendo a legibilidade
   const styles: Record<string, string> = { 
     pending: "text-yellow-400 bg-yellow-950/40 border border-yellow-900/50", 
     processing: "text-blue-400 bg-blue-950/40 border border-blue-900/50", 

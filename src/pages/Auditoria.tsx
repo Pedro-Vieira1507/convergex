@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { supabase } from "@/lib/supabase";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import {
   DollarSign,
   Truck
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export default function AuditoriaFretes() {
   const { toast } = useToast();
@@ -48,7 +49,6 @@ export default function AuditoriaFretes() {
   // Estados - UI e Loading
   const [isSearchingApi, setIsSearchingApi] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
-  const [loadingIntelipost, setLoadingIntelipost] = useState(false);
   
   // Estados - Dados
   const [auditorias, setAuditorias] = useState<any[]>([]);
@@ -73,71 +73,9 @@ export default function AuditoriaFretes() {
   };
 
   // ============================================================
-  // FUNÇÃO: CRUZAMENTO COM INTELIPOST (TMS) VIA NOTA FISCAL
+  // FUNÇÃO ÚNICA: PROCESSAR ARQUIVOS EDI (VIA BACKEND)
   // ============================================================
-  const cruzarComIntelipost = async (resultadosTransportadora: any[]) => {
-    setLoadingIntelipost(true);
-    const resultadosAuditoria = [...resultadosTransportadora];
-
-    try {
-      await Promise.all(resultadosAuditoria.map(async (item) => {
-        // Ignora faturas, arquivos puros ou itens sem NF vinculada
-        if (item.tipo_registro === 'fatura' || item.tipo_registro === 'ftp_file' || !item.pedido || item.pedido === 'N/A') return;
-
-        try {
-          // Extrai a PRIMEIRA nota fiscal para a busca
-          const nfParaBusca = item.pedido.split(', ')[0];
-          
-          // Define qual função chamar (braspress, jamef ou correios)
-          let nomeDaFuncao = 'intelipost-proxy'; // Default para correios
-          let actionDaFuncao = 'GET_ESTIMATIVA'; // Default para correios
-
-          if (item.transportadora === 'Braspress' || item.transportadora === 'Jamef') {
-              nomeDaFuncao = 'braspress-proxy'; // Nosso hub que consulta a NF na Intelipost
-              actionDaFuncao = 'GET_BY_INVOICE';
-          }
-
-          const res = await supabase.functions.invoke(nomeDaFuncao, {
-            body: { 
-              action: actionDaFuncao, 
-              invoiceNumber: nfParaBusca,
-              trackingCode: item.awb, 
-              orderNumber: item.pedido 
-            }
-          });
-
-          if (res.data && res.data.estimado !== undefined) {
-            item.frete_estimado = res.data.estimado;
-            
-            // Guarda o payload completo da Intelipost para renderizar no modal
-            if (res.data.dados_completos) {
-               item.intelipost_data = res.data.dados_completos;
-            }
-            
-            if (item.frete_estimado > 0 && item.frete_real > 0) {
-                item.divergencia_financeira = item.frete_real - item.frete_estimado;
-                item.status = item.divergencia_financeira > 0.5 ? 'Prejuízo TMS' : (item.divergencia_financeira < -0.5 ? 'Lucro TMS' : 'Conciliado');
-            } else if (item.frete_estimado > 0 && item.frete_real === 0) {
-                item.status = 'Aguardando CT-e'; // Atualizado para clareza
-            }
-          }
-        } catch (e) {
-          console.error(`Erro ao cruzar NF ${item.pedido}:`, e);
-        }
-      }));
-
-      setAuditorias(resultadosAuditoria);
-    } catch (err) {
-      console.error("Falha no cruzamento com Intelipost", err);
-    } finally {
-      setLoadingIntelipost(false);
-    }
-  };
-
-  // ============================================================
-  // FUNÇÃO: BUSCAR E LER OS XMLs DO STORAGE (BRASPRESS)
-  // ============================================================
-  const handleListarStorageBraspress = async () => {
+  const handleProcessarEDI = async () => {
     if (!dataInicial || !dataFinal) {
       toast({ variant: "destructive", title: "Atenção", description: "Selecione a Data Inicial e Final." });
       return;
@@ -147,292 +85,30 @@ export default function AuditoriaFretes() {
     setAuditorias([]);
 
     try {
-      const [anoIni, mesIni, diaIni] = dataInicial.split('-').map(Number);
-      const start = new Date(anoIni, mesIni - 1, diaIni, 0, 0, 0);
+      toast({ title: "Processando na Nuvem...", description: `O servidor está lendo e cruzando os arquivos da ${transportadoraAtiva} com o TMS.` });
 
-      const [anoFim, mesFim, diaFim] = dataFinal.split('-').map(Number);
-      const end = new Date(anoFim, mesFim - 1, diaFim, 23, 59, 59, 999);
+      const { data, error } = await supabase.functions.invoke('edi-processor', {
+        body: { 
+          transportadora: transportadoraAtiva, 
+          dataInicial, 
+          dataFinal 
+        }
+      });
 
-      const { data: files, error: listError } = await supabase.storage
-        .from('edi-braspress') 
-        .list('', { limit: 1000, sortBy: { column: 'created_at', order: 'desc' } });
+      if (error) throw error;
+      if (data.error) throw new Error(data.error);
 
-      if (listError) throw listError;
-
-      const arquivosValidos = files?.filter(file => {
-        return file.name !== '.emptyFolderPlaceholder' && !file.name.toLowerCase().endsWith('.txt');
-      }) || [];
-
-      if (arquivosValidos.length === 0) {
-        toast({ title: "Nenhum arquivo", description: "Não há arquivos brutos no Storage no momento." });
+      if (!data.resultados || data.resultados.length === 0) {
+        toast({ title: "Nenhum resultado", description: `Não há arquivos válidos da ${transportadoraAtiva} no período selecionado.` });
         setIsSearchingApi(false);
         return;
       }
 
-      toast({ title: "Analisando XMLs...", description: `Lendo ${arquivosValidos.length} arquivos para extrair dados...` });
-
-      const formatadosBrutos = await Promise.all(arquivosValidos.map(async (file, index) => {
-        const { data: fileBlob } = await supabase.storage
-          .from('edi-braspress')
-          .download(file.name);
-
-        let freteReal = 0;
-        let chaveNFe = "Desconhecida";
-        let numeroCTe = file.name;
-        let dataEmissao = file.created_at; 
-        
-        let componentesFrete: { nome: string, valor: number }[] = [];
-        let peso = 0;
-        let volumes = 0;
-        let valorCarga = 0;
-
-        if (fileBlob) {
-          try {
-            const xmlText = await fileBlob.text();
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-
-            const getNodes = (doc: any, tag: string) => {
-                let nodes = doc.getElementsByTagName(tag);
-                if (nodes.length === 0) nodes = doc.getElementsByTagNameNS("*", tag);
-                return nodes;
-            };
-
-            const vTPrestNode = getNodes(xmlDoc, "vTPrest")[0];
-            if (vTPrestNode) freteReal = parseFloat(vTPrestNode.textContent || "0");
-
-            const nCTNode = getNodes(xmlDoc, "nCT")[0];
-            if (nCTNode) numeroCTe = `CTe-${nCTNode.textContent}`;
-
-            const chaveNodes = getNodes(xmlDoc, "chave");
-            const nfes = [];
-            for (let i = 0; i < chaveNodes.length; i++) {
-                const chave = chaveNodes[i].textContent || "";
-                if (chave.length === 44) {
-                    nfes.push(chave.substring(25, 34).replace(/^0+/, ''));
-                }
-            }
-            if (nfes.length > 0) chaveNFe = nfes.join(', ');
-
-            const dhEmiNode = getNodes(xmlDoc, "dhEmi")[0];
-            if (dhEmiNode) dataEmissao = dhEmiNode.textContent;
-
-            const compNodes = getNodes(xmlDoc, "Comp");
-            for (let i = 0; i < compNodes.length; i++) {
-                const nome = getNodes(compNodes[i], "xNome")[0]?.textContent || "";
-                const valor = parseFloat(getNodes(compNodes[i], "vComp")[0]?.textContent || "0");
-                if (nome && !isNaN(valor)) componentesFrete.push({ nome, valor });
-            }
-
-            const vCargaNode = getNodes(xmlDoc, "vCarga")[0];
-            if (vCargaNode) valorCarga = parseFloat(vCargaNode.textContent || "0");
-
-            const infQNodes = getNodes(xmlDoc, "infQ");
-            for (let i = 0; i < infQNodes.length; i++) {
-                const tpMed = getNodes(infQNodes[i], "tpMed")[0]?.textContent || "";
-                const qCarga = parseFloat(getNodes(infQNodes[i], "qCarga")[0]?.textContent || "0");
-                
-                if (tpMed.toUpperCase().includes("PESO")) peso = qCarga;
-                if (tpMed.toUpperCase().includes("CAIXA") || tpMed.toUpperCase().includes("VOLUME") || tpMed.toUpperCase().includes("UNID")) volumes = qCarga;
-            }
-
-          } catch (e) {
-             console.error(`Erro ao fazer parser do arquivo ${file.name}`, e);
-          }
-        }
-
-        return {
-          id: file.id || `xml-${index}`,
-          tipo_registro: 'pacote', 
-          pedido: chaveNFe,        
-          awb: numeroCTe,
-          transportadora: 'Braspress',
-          frete_estimado: 0,       
-          frete_real: freteReal,   
-          divergencia_financeira: 0,
-          status: freteReal > 0 ? 'Lido com sucesso' : 'Arquivo Inválido',
-          data: dataEmissao, 
-          raw_data: { 
-             fileName: file.name,
-             componentesFrete,
-             peso,
-             volumes,
-             valorCarga
-          }
-        };
-      }));
-
-      const formatados = formatadosBrutos.filter(item => {
-        if (!item.data) return false;
-        const itemDate = new Date(item.data);
-        return itemDate >= start && itemDate <= end;
-      });
-
-      if (formatados.length === 0) {
-         toast({ variant: "destructive", title: "Fora do Período", description: `Lemos os arquivos, mas nenhum CT-e foi EMITIDO nesse período.` });
-         setIsSearchingApi(false);
-         return;
-      }
-
-      setAuditorias(formatados);
-      
-      const sucesso = formatados.filter(f => f.frete_real > 0).length;
-      toast({ title: "Leitura Concluída", description: `${sucesso} CT-es encontrados no período. Cruzando com TMS...` });
-
-      cruzarComIntelipost(formatados);
+      setAuditorias(data.resultados);
+      toast({ title: "Auditoria Concluída!", description: `${data.resultados.length} conhecimentos avaliados com sucesso.` });
 
     } catch (err: any) {
-      toast({ variant: "destructive", title: "Erro", description: err.message || "Falha ao ler o Storage." });
-    } finally {
-      setIsSearchingApi(false);
-    }
-  };
-
-  // ============================================================
-  // FUNÇÃO: BUSCAR E LER OS TXTs DO STORAGE (JAMEF PROCEDA)
-  // ============================================================
-  const handleListarStorageJamef = async () => {
-    if (!dataInicial || !dataFinal) {
-      toast({ variant: "destructive", title: "Atenção", description: "Selecione a Data Inicial e Final." });
-      return;
-    }
-
-    setIsSearchingApi(true);
-    setAuditorias([]);
-
-    try {
-      const [anoIni, mesIni, diaIni] = dataInicial.split('-').map(Number);
-      const start = new Date(anoIni, mesIni - 1, diaIni, 0, 0, 0);
-
-      const [anoFim, mesFim, diaFim] = dataFinal.split('-').map(Number);
-      const end = new Date(anoFim, mesFim - 1, diaFim, 23, 59, 59, 999);
-
-      const { data: files, error: listError } = await supabase.storage
-        .from('edi-jamef') 
-        .list('', { limit: 1000, sortBy: { column: 'created_at', order: 'desc' } });
-
-      if (listError) throw listError;
-
-      const arquivosValidos = files?.filter(file => {
-        return file.name !== '.emptyFolderPlaceholder' && file.name.toLowerCase().endsWith('.txt');
-      }) || [];
-
-      if (arquivosValidos.length === 0) {
-        toast({ title: "Nenhum arquivo", description: "Não há arquivos TXT da Jamef no Storage no momento." });
-        setIsSearchingApi(false);
-        return;
-      }
-
-      toast({ title: "Analisando TXTs...", description: `Lendo ${arquivosValidos.length} arquivos da Jamef...` });
-
-      const formatadosBrutos = await Promise.all(arquivosValidos.map(async (file, index) => {
-        const { data: fileBlob } = await supabase.storage
-          .from('edi-jamef')
-          .download(file.name);
-
-        let freteReal = 0;
-        let chaveNFe = "N/A"; 
-        let numeroCTe = file.name;
-        let dataEmissao = file.created_at; 
-        
-        let componentesFrete: { nome: string, valor: number }[] = [];
-        let peso = 0;
-        let volumes = 0;
-        let valorCarga = 0;
-
-        if (fileBlob) {
-          try {
-            const text = await fileBlob.text();
-            const linhas = text.split('\n');
-            
-            // Verifica se é um arquivo de envio (NOTFIS) que não deve ser faturado como real
-            const isNotfis = file.name.toUpperCase().includes('NOTFIS') || file.name.toUpperCase().includes('NOTFI');
-            let freteDestacado = 0;
-
-            linhas.forEach(linha => {
-               // LINHA 313: DADOS DA NF, VALOR DA MERCADORIA E FRETE DESTACADO
-               if (linha.startsWith('313')) {
-                  const match44 = linha.match(/\d{44}/);
-                  if (match44) {
-                      chaveNFe = match44[0].substring(25, 34).replace(/^0+/, '');
-                  }
-
-                  const matchValores = linha.match(/CAIXAS\s+(\d{5})(\d{14})/);
-                  if (matchValores) {
-                      volumes = parseInt(matchValores[1], 10);
-                      valorCarga = parseFloat(matchValores[2]) / 100;
-                  }
-
-                  const matchFrete = linha.match(/\s+(\d{15})[A-Z]\s+/);
-                  if (matchFrete) {
-                      freteDestacado = parseFloat(matchFrete[1]) / 100;
-                  }
-               }
-
-               // LINHA 318: DADOS DE PESO
-               if (linha.startsWith('318')) {
-                  const pesoStr = linha.substring(48, 63);
-                  if (pesoStr && !isNaN(Number(pesoStr))) {
-                      peso = parseFloat(pesoStr) / 100;
-                  }
-               }
-            });
-
-            // LÓGICA DE BLINDAGEM DA AUDITORIA
-            if (isNotfis) {
-                freteReal = 0; // Força zero, pois NOTFIS não é cobrança real
-                componentesFrete.push({ nome: "Frete Previsto (Arquivo NOTFIS)", valor: freteDestacado });
-            } else {
-                // Quando chegar o CONEMB/DOCCOB real
-                freteReal = freteDestacado; 
-                componentesFrete.push({ nome: "Frete Cobrado (CT-e)", valor: freteReal });
-            }
-
-          } catch (e) {
-             console.error(`Erro ao ler o TXT ${file.name}`, e);
-          }
-        }
-
-        return {
-          id: file.id || `txt-${index}`,
-          tipo_registro: 'pacote', 
-          pedido: chaveNFe,        
-          awb: numeroCTe,
-          transportadora: 'Jamef',
-          frete_estimado: 0,       
-          frete_real: freteReal,   
-          divergencia_financeira: 0,
-          status: freteReal === 0 ? 'Aguardando CT-e' : 'Faturado',
-          data: dataEmissao, 
-          raw_data: { 
-             fileName: file.name,
-             componentesFrete,
-             peso,
-             volumes,
-             valorCarga
-          }
-        };
-      }));
-
-      const formatados = formatadosBrutos.filter(item => {
-        if (!item.data) return false;
-        const itemDate = new Date(item.data);
-        return itemDate >= start && itemDate <= end;
-      });
-
-      if (formatados.length === 0) {
-         toast({ variant: "destructive", title: "Fora do Período", description: `Nenhum arquivo TXT encontrado nesse período.` });
-         setIsSearchingApi(false);
-         return;
-      }
-
-      setAuditorias(formatados);
-      toast({ title: "Leitura Concluída", description: `Buscando valores na Intelipost para as notas encontradas...` });
-
-      cruzarComIntelipost(formatados);
-
-    } catch (err: any) {
-      toast({ variant: "destructive", title: "Erro", description: err.message || "Falha ao ler o Storage." });
+      toast({ variant: "destructive", title: "Erro na Auditoria", description: err.message || "Falha ao comunicar com o servidor." });
     } finally {
       setIsSearchingApi(false);
     }
@@ -484,8 +160,15 @@ export default function AuditoriaFretes() {
         }];
         
         setAuditorias(formatados);
+
         toast({ title: "Sucesso", description: `Cruzando dados com Intelipost...` });
-        cruzarComIntelipost(formatados);
+        const res = await supabase.functions.invoke('intelipost-proxy', {
+            body: { action: 'GET_ESTIMATIVA', trackingCode: formatados[0].awb }
+        });
+        if (res.data && res.data.estimado !== undefined) {
+             formatados[0].frete_estimado = res.data.estimado;
+             setAuditorias([...formatados]);
+        }
 
       } else {
         if (!dataInicial || !dataFinal) {
@@ -544,11 +227,22 @@ export default function AuditoriaFretes() {
             raw_data: d 
           }));
           setAuditorias(formatados);
+          
           toast({ title: "Resultados", description: `Cruzando ${formatados.length} pacotes com Intelipost...` });
-          cruzarComIntelipost(formatados);
+          
+          await Promise.all(formatados.map(async (item) => {
+             const r = await supabase.functions.invoke('intelipost-proxy', { body: { action: 'GET_ESTIMATIVA', trackingCode: item.awb } });
+             if (r.data && r.data.estimado !== undefined) {
+                 item.frete_estimado = r.data.estimado;
+                 if (item.frete_estimado > 0 && item.frete_real > 0) {
+                    item.divergencia_financeira = item.frete_real - item.frete_estimado;
+                    item.status = item.divergencia_financeira > 0.5 ? 'Prejuízo TMS' : (item.divergencia_financeira < -0.5 ? 'Lucro TMS' : 'Conciliado');
+                 }
+             }
+          }));
+          setAuditorias([...formatados]);
         }
       }
-
     } catch (err: any) {
       toast({ variant: "destructive", title: "Falha na busca", description: err.message });
     } finally {
@@ -600,6 +294,19 @@ export default function AuditoriaFretes() {
     }
   };
 
+  // Funções auxiliares para UI Dinâmica
+  const isEDIProvider = ['Braspress', 'Jamef', 'Movvi'].includes(transportadoraAtiva);
+  
+  const getProviderColor = (provider: string, variant: 'text' | 'bg' | 'ring' | 'border') => {
+    const colors: Record<string, any> = {
+      Braspress: { text: 'text-emerald-500', bg: 'bg-emerald-600 hover:bg-emerald-700', ring: 'focus-visible:ring-emerald-500', border: 'border-emerald-500' },
+      Jamef: { text: 'text-red-500', bg: 'bg-red-600 hover:bg-red-700', ring: 'focus-visible:ring-red-500', border: 'border-red-500' },
+      Movvi: { text: 'text-purple-500', bg: 'bg-purple-600 hover:bg-purple-700', ring: 'focus-visible:ring-purple-500', border: 'border-purple-500' },
+      Correios: { text: 'text-yellow-500', bg: 'bg-yellow-600 hover:bg-yellow-700', ring: 'focus-visible:ring-yellow-500', border: 'border-yellow-500' }
+    };
+    return colors[provider]?.[variant] || colors.Braspress[variant];
+  };
+
   // ============================================================
   // RENDERIZAÇÃO: TELA INICIAL (SELEÇÃO)
   // ============================================================
@@ -612,9 +319,10 @@ export default function AuditoriaFretes() {
           </h1>
           <p className="text-stone-400">Auditoria automatizada: As cobranças das transportadoras são cruzadas em tempo real com os valores da Intelipost.</p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-4">
+        
+        {/* === CARDS DAS TRANSPORTADORAS === */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 pt-4">
           
-          {/* CARD BRASPRESS */}
           <div onClick={() => handleSelectTransportadora('Braspress')} className="group bg-stone-900 border border-stone-800 hover:border-emerald-500 hover:bg-stone-900/80 cursor-pointer rounded-xl p-6 flex flex-col items-center text-center gap-4 transition-all">
             <div className="w-full h-28 bg-white/90 rounded-lg flex items-center justify-center p-4">
               <img src="https://logodownload.org/wp-content/uploads/2019/11/braspress-logo.png" alt="Braspress" className="max-h-full grayscale group-hover:grayscale-0 transition-all" />
@@ -622,12 +330,11 @@ export default function AuditoriaFretes() {
             <div>
               <h3 className="text-lg font-bold text-stone-200">Braspress</h3>
               <span className="text-xs text-stone-500 mt-1 flex items-center justify-center gap-1 uppercase">
-                <FolderSync className="w-3 h-3" /> Integração em Nuvem
+                <FolderSync className="w-3 h-3" /> Nuvem
               </span>
             </div>
           </div>
 
-          {/* CARD JAMEF */}
           <div onClick={() => handleSelectTransportadora('Jamef')} className="group bg-stone-900 border border-stone-800 hover:border-red-500 hover:bg-stone-900/80 cursor-pointer rounded-xl p-6 flex flex-col items-center text-center gap-4 transition-all">
             <div className="w-full h-28 bg-red-950/20 rounded-lg flex items-center justify-center p-4">
               <Truck className="w-16 h-16 text-red-500/60 group-hover:text-red-600 transition-colors" />
@@ -635,19 +342,31 @@ export default function AuditoriaFretes() {
             <div>
               <h3 className="text-lg font-bold text-stone-200">Jamef</h3>
               <span className="text-xs text-stone-500 mt-1 flex items-center justify-center gap-1 uppercase">
-                <FolderSync className="w-3 h-3" /> Integração em Nuvem
+                <FolderSync className="w-3 h-3" /> Nuvem
               </span>
             </div>
           </div>
 
-          {/* CARD CORREIOS */}
+          {/* NOVO CARD: MOVVI */}
+          <div onClick={() => handleSelectTransportadora('Movvi')} className="group bg-stone-900 border border-stone-800 hover:border-purple-500 hover:bg-stone-900/80 cursor-pointer rounded-xl p-6 flex flex-col items-center text-center gap-4 transition-all">
+            <div className="w-full h-28 bg-purple-950/20 rounded-lg flex items-center justify-center p-4">
+              <Truck className="w-16 h-16 text-purple-500/60 group-hover:text-purple-600 transition-colors" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-stone-200">Movvi</h3>
+              <span className="text-xs text-stone-500 mt-1 flex items-center justify-center gap-1 uppercase">
+                <FolderSync className="w-3 h-3" /> Nuvem
+              </span>
+            </div>
+          </div>
+
           <div onClick={() => handleSelectTransportadora('Correios')} className="group bg-stone-900 border border-stone-800 hover:border-yellow-500 hover:bg-stone-900/80 cursor-pointer rounded-xl p-6 flex flex-col items-center text-center gap-4 transition-all">
             <div className="w-full h-28 bg-yellow-400/10 rounded-lg flex items-center justify-center p-4">
               <Package className="w-16 h-16 text-yellow-500/60 group-hover:text-yellow-500 transition-colors" />
             </div>
             <div>
               <h3 className="text-lg font-bold text-stone-200">Correios</h3>
-              <span className="text-xs text-stone-500 mt-1 block uppercase">Auditoria de Faturas / PLP</span>
+              <span className="text-xs text-stone-500 mt-1 block uppercase">Faturas / PLP</span>
             </div>
           </div>
 
@@ -664,35 +383,35 @@ export default function AuditoriaFretes() {
       <div className="flex items-center gap-4 w-full">
         <Button variant="ghost" size="icon" onClick={handleVoltar} className="text-stone-400 hover:text-white hover:bg-stone-800 rounded-full w-10 h-10 shrink-0"><ArrowLeft className="w-5 h-5" /></Button>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-stone-100 flex items-center gap-3">
-          Auditoria: <span className={transportadoraAtiva === 'Correios' ? 'text-yellow-500' : (transportadoraAtiva === 'Jamef' ? 'text-red-500' : 'text-emerald-500')}>{transportadoraAtiva}</span>
+          Auditoria: <span className={getProviderColor(transportadoraAtiva, 'text')}>{transportadoraAtiva}</span>
         </h1>
       </div>
 
       <Card className="bg-stone-900 border-stone-800 shadow-sm">
         <CardContent className="p-4 sm:p-6">
-          {transportadoraAtiva === 'Braspress' || transportadoraAtiva === 'Jamef' ? (
+          {isEDIProvider ? (
             <div className="flex flex-col sm:flex-row gap-4 items-end w-full bg-stone-950 p-4 rounded-lg border border-stone-800">
               <div className="w-full sm:w-1/3">
                 <h3 className="text-lg font-bold text-stone-200 flex items-center gap-2 mb-1">
-                  <FolderSync className={`w-5 h-5 ${transportadoraAtiva === 'Jamef' ? 'text-red-500' : 'text-emerald-500'}`} /> Diretório de Faturas
+                  <FolderSync className={cn("w-5 h-5", getProviderColor(transportadoraAtiva, 'text'))} /> Arquivos Sincronizados
                 </h3>
-                <p className="text-sm text-stone-400">Filtrando arquivos sincronizados no Storage.</p>
+                <p className="text-sm text-stone-400">Auditoria processada 100% no servidor.</p>
               </div>
               <div className="w-full sm:w-1/4">
                 <label className="text-sm font-medium text-stone-400 mb-1 block">Data Inicial</label>
-                <Input type="date" className={`bg-stone-950 border-stone-800 focus-visible:ring-${transportadoraAtiva === 'Jamef' ? 'red' : 'emerald'}-500 [color-scheme:dark]`} value={dataInicial} onChange={(e) => setDataInicial(e.target.value)} />
+                <Input type="date" className={cn("bg-stone-950 border-stone-800 [color-scheme:dark]", getProviderColor(transportadoraAtiva, 'ring'))} value={dataInicial} onChange={(e) => setDataInicial(e.target.value)} />
               </div>
               <div className="w-full sm:w-1/4">
                 <label className="text-sm font-medium text-stone-400 mb-1 block">Data Final</label>
-                <Input type="date" className={`bg-stone-950 border-stone-800 focus-visible:ring-${transportadoraAtiva === 'Jamef' ? 'red' : 'emerald'}-500 [color-scheme:dark]`} value={dataFinal} onChange={(e) => setDataFinal(e.target.value)} />
+                <Input type="date" className={cn("bg-stone-950 border-stone-800 [color-scheme:dark]", getProviderColor(transportadoraAtiva, 'ring'))} value={dataFinal} onChange={(e) => setDataFinal(e.target.value)} />
               </div>
               <Button 
-                onClick={transportadoraAtiva === 'Braspress' ? handleListarStorageBraspress : handleListarStorageJamef} 
+                onClick={handleProcessarEDI} 
                 disabled={isSearchingApi} 
-                className={`w-full sm:w-auto text-white shadow-sm h-10 px-6 ${transportadoraAtiva === 'Jamef' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                className={cn("w-full sm:w-auto text-white shadow-sm h-10 px-6", getProviderColor(transportadoraAtiva, 'bg'))}
               >
                 {isSearchingApi ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />} 
-                Auditar Período
+                Processar na Nuvem
               </Button>
             </div>
           ) : (
@@ -721,21 +440,13 @@ export default function AuditoriaFretes() {
                 </>
               )}
               
-              <Button type="submit" disabled={isSearchingApi || loadingIntelipost || (correiosTipoBusca === 'rastreio' && !correiosRastreio.trim())} className="w-full sm:w-auto bg-yellow-600 hover:bg-yellow-700 text-stone-950 font-bold shadow-sm h-10 px-8">
-                {(isSearchingApi || loadingIntelipost) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />} Auditar
+              <Button type="submit" disabled={isSearchingApi} className="w-full sm:w-auto bg-yellow-600 hover:bg-yellow-700 text-stone-950 font-bold shadow-sm h-10 px-8">
+                {isSearchingApi ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />} Auditar
               </Button>
             </form>
           )}
         </CardContent>
       </Card>
-
-      {/* ALERTA DE PROCESSAMENTO EM SEGUNDO PLANO */}
-      {loadingIntelipost && (
-        <div className="bg-blue-950/30 border border-blue-900/50 p-4 rounded-lg flex items-center gap-3 text-blue-400 animate-pulse">
-          <Loader2 className="w-5 h-5 animate-spin" />
-          <span className="text-sm font-medium">Buscando valores originais na Intelipost e calculando divergências...</span>
-        </div>
-      )}
 
       {/* TABELA DE RESULTADOS */}
       {auditorias.length > 0 && (
@@ -757,16 +468,14 @@ export default function AuditoriaFretes() {
                     </>
                   )}
                   {auditorias[0].tipo_registro === 'pacote' && <th className="h-10 px-4 text-right font-medium text-stone-400">Divergência R$</th>}
-                  <th className="h-10 px-4 text-center font-medium text-stone-400">
-                    {auditorias[0].tipo_registro === 'ftp_file' ? 'Tamanho' : 'Status Auditoria'}
-                  </th>
+                  <th className="h-10 px-4 text-center font-medium text-stone-400">Status Auditoria</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-800">
                 {auditorias.map((item, index) => (
                   <tr key={item.id ? `${item.id}-${index}` : `row-${index}`} className="hover:bg-stone-800/50">
                     <td className="p-3 font-bold text-stone-200">
-                      <button onClick={() => handleAuditClick(item)} className={`font-bold hover:underline flex items-center gap-1 sm:gap-2 whitespace-nowrap ${transportadoraAtiva === 'Correios' ? 'text-yellow-500' : (transportadoraAtiva === 'Jamef' ? 'text-red-400' : 'text-emerald-400')}`}>
+                      <button onClick={() => handleAuditClick(item)} className={cn("font-bold hover:underline flex items-center gap-1 sm:gap-2 whitespace-nowrap", getProviderColor(transportadoraAtiva, 'text'))}>
                         {item.awb}
                       </button>
                     </td>
@@ -777,7 +486,7 @@ export default function AuditoriaFretes() {
                     {item.tipo_registro !== 'rastreio' && item.tipo_registro !== 'ftp_file' && (
                       <>
                         <td className="p-3 text-right text-stone-400 whitespace-nowrap">
-                          {item.frete_estimado > 0 ? Number(item.frete_estimado).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : (loadingIntelipost && item.tipo_registro === 'pacote' ? 'Calculando...' : 'Não achou TMS')}
+                          {item.frete_estimado > 0 ? Number(item.frete_estimado).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'Não achou TMS'}
                         </td>
                         <td className="p-3 text-right font-medium text-stone-200 whitespace-nowrap">
                           {item.frete_real > 0 ? Number(item.frete_real).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '-'}
@@ -806,25 +515,10 @@ export default function AuditoriaFretes() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-stone-100 text-xl">
               {selectedAudit?.tipo_registro === 'fatura' ? <FileText className="h-6 w-6 text-yellow-500" /> : 
-               selectedAudit?.tipo_registro === 'ftp_file' ? <FolderSync className="h-6 w-6 text-emerald-500" /> :
-               <Package className={`h-6 w-6 ${selectedAudit?.transportadora === 'Jamef' ? 'text-red-500' : 'text-emerald-500'}`} />} 
+               <Package className={cn("h-6 w-6", getProviderColor(selectedAudit?.transportadora || transportadoraAtiva, 'text'))} />} 
               Detalhes <span className="text-stone-400">{selectedAudit?.awb}</span>
             </DialogTitle>
           </DialogHeader>
-
-          {/* DADOS STORAGE BRASPRESS/JAMEF */}
-          {selectedAudit?.tipo_registro === 'ftp_file' && selectedAudit?.raw_data && (
-            <div className="space-y-4 mt-4">
-              <div className="bg-stone-950 p-4 rounded-lg border border-stone-800">
-                <p className="text-sm text-stone-400 mb-2">Este é um arquivo EDI/XML salvo no Supabase pelo Make.com. O próximo passo será ler o conteúdo para exibir os valores cobrados nesta fatura.</p>
-                <div className="bg-stone-900 p-3 rounded border border-stone-800 font-mono text-xs text-stone-400 space-y-1">
-                  <p><strong>Nome no bucket:</strong> {selectedAudit.raw_data.name}</p>
-                  <p><strong>Adicionado em:</strong> {new Date(selectedAudit.raw_data.created_at).toLocaleString('pt-BR')}</p>
-                  <p><strong>Tamanho (bytes):</strong> {selectedAudit.raw_data.metadata?.size || 'N/A'}</p>
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* DADOS DOS CORREIOS - RASTREIO INDIVIDUAL */}
           {selectedAudit?.tipo_registro === 'rastreio' && selectedAudit?.raw_data && (
@@ -858,14 +552,14 @@ export default function AuditoriaFretes() {
           {selectedAudit?.tipo_registro === 'pacote' && selectedAudit?.raw_data && (
             <div className="space-y-6 mt-4">
               
-              {/* MODAL EXCLUSIVO DA BRASPRESS & JAMEF */}
-              {(selectedAudit.transportadora === 'Braspress' || selectedAudit.transportadora === 'Jamef') && (
+              {/* MODAL EXCLUSIVO DA BRASPRESS, JAMEF & MOVVI */}
+              {(selectedAudit.transportadora === 'Braspress' || selectedAudit.transportadora === 'Jamef' || selectedAudit.transportadora === 'Movvi') && (
                 <>
-                  <div className={`bg-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-950/20 border border-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-900/50 p-4 rounded-lg flex items-start gap-4`}>
-                    <FileText className={`w-5 h-5 text-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-500 mt-0.5 shrink-0`} />
+                  <div className="bg-stone-950 p-4 rounded-lg border border-stone-800 flex items-start gap-4">
+                    <FileText className={cn("w-5 h-5 mt-0.5 shrink-0", getProviderColor(selectedAudit.transportadora, 'text'))} />
                     <div>
-                      <h4 className={`font-bold text-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-400 uppercase tracking-wider text-sm mb-1`}>Leitura do Arquivo Concluída</h4>
-                      <p className="text-sm text-stone-300">Cruzamento de dados entre o arquivo da {selectedAudit.transportadora} e a estimativa do Intelipost (TMS).</p>
+                      <h4 className={cn("font-bold uppercase tracking-wider text-sm mb-1", getProviderColor(selectedAudit.transportadora, 'text'))}>Leitura do Arquivo Concluída</h4>
+                      <p className="text-sm text-stone-300">Processamento feito na nuvem pela API de conversão EDI.</p>
                     </div>
                   </div>
 
@@ -901,14 +595,14 @@ export default function AuditoriaFretes() {
                     {/* Bloco TRANSPORTADORA */}
                     <div className="bg-stone-950 p-4 rounded-lg border border-stone-800 relative overflow-hidden">
                       <div className="absolute top-0 right-0 bg-stone-800 text-[10px] px-2 py-1 font-bold text-stone-400 rounded-bl-lg uppercase tracking-wider">Cobrado na Fatura</div>
-                      <h4 className={`font-semibold text-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-500 mb-4 flex items-center gap-2 pb-2 border-b border-stone-800`}><Package className="w-4 h-4" /> Dados {selectedAudit.transportadora}</h4>
+                      <h4 className={cn("font-semibold mb-4 flex items-center gap-2 pb-2 border-b border-stone-800", getProviderColor(selectedAudit.transportadora, 'text'))}><Package className="w-4 h-4" /> Dados {selectedAudit.transportadora}</h4>
                       <div className="space-y-3 text-sm text-stone-400">
                         <div className="flex justify-between"><span>Nota Fiscal:</span> <strong className="text-stone-200">{selectedAudit.pedido || 'N/A'}</strong></div>
                         <div className="flex justify-between"><span>Peso Informado:</span> <strong className="text-stone-200">{selectedAudit.raw_data?.peso || 0} kg</strong></div>
                         <div className="flex justify-between"><span>Volumes / Caixas:</span> <strong className="text-stone-200">{selectedAudit.raw_data?.volumes || 0} un.</strong></div>
                         <div className="flex justify-between"><span>Valor Carga:</span> <strong className="text-stone-200">{Number(selectedAudit.raw_data?.valorCarga || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</strong></div>
                         
-                        <div className={`pt-3 mt-3 border-t border-stone-800 flex justify-between items-center text-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-400 font-bold text-base`}>
+                        <div className={cn("pt-3 mt-3 border-t border-stone-800 flex justify-between items-center font-bold text-base", getProviderColor(selectedAudit.transportadora, 'text'))}>
                             <span>Valor Cobrado (CT-e)</span>
                             <span>{selectedAudit.frete_real === 0 ? 'Aguardando CT-e' : Number(selectedAudit.frete_real).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span>
                         </div>
@@ -918,7 +612,7 @@ export default function AuditoriaFretes() {
 
                   {/* Bloco 3: Detalhamento do Frete */}
                   <div className="bg-stone-950 p-4 rounded-lg border border-stone-800 mt-4">
-                    <h4 className="font-semibold text-stone-300 mb-4 flex items-center gap-2 pb-2 border-b border-stone-800"><DollarSign className={`w-4 h-4 text-${selectedAudit.transportadora === 'Jamef' ? 'red' : 'emerald'}-500`} /> Composição do Frete {selectedAudit.transportadora}</h4>
+                    <h4 className="font-semibold text-stone-300 mb-4 flex items-center gap-2 pb-2 border-b border-stone-800"><DollarSign className={cn("w-4 h-4", getProviderColor(selectedAudit.transportadora, 'text'))} /> Composição do Frete {selectedAudit.transportadora}</h4>
                     <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm text-stone-400">
                       {selectedAudit.raw_data?.componentesFrete?.map((comp: any, i: number) => (
                         <div key={i} className="flex justify-between items-center col-span-2 sm:col-span-1">
@@ -968,34 +662,7 @@ export default function AuditoriaFretes() {
               )}
             </div>
           )}
-
-          {/* DADOS DOS CORREIOS - FATURA */}
-          {selectedAudit?.tipo_registro === 'fatura' && selectedAudit?.raw_data && (
-            <div className="space-y-6 mt-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="bg-stone-950 p-4 rounded-lg border border-stone-800">
-                  <div className="flex items-center gap-2 text-stone-400 mb-2"><FileText className="w-4 h-4" /> <span className="text-sm font-medium">Dados da Fatura</span></div>
-                  <p className="text-sm text-stone-400">Contrato: <span className="text-stone-200">{selectedAudit.raw_data.contrato}</span></p>
-                  <p className="text-sm text-stone-400 mt-1">Vencimento: <span className="text-stone-200">{selectedAudit.raw_data.vencimento ? new Date(selectedAudit.raw_data.vencimento).toLocaleDateString('pt-BR') : '-'}</span></p>
-                </div>
-                <div className="bg-stone-950 p-4 rounded-lg border border-stone-800">
-                  <div className="flex items-center gap-2 text-stone-400 mb-2"><DollarSign className="w-4 h-4" /> <span className="text-sm font-medium">Valores</span></div>
-                  <p className="text-sm text-stone-400">Valor Total: <span className="text-stone-200 font-bold">{Number(selectedAudit.raw_data.valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span></p>
-                  <p className="text-sm text-stone-400 mt-1">A Pagar: <span className="text-red-400 font-bold">{Number(selectedAudit.raw_data.valorEmAberto).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span></p>
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-stone-800">
-                 <Button onClick={() => handleDownloadPdf('sintetico')} disabled={isDownloadingPdf} variant="outline" className="w-full bg-stone-950 border-stone-700 text-stone-300 hover:bg-stone-800 hover:text-white">
-                    {isDownloadingPdf ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2 text-stone-400" />} Baixar Extrato Sintético
-                 </Button>
-                 <Button onClick={() => handleDownloadPdf('boleto')} disabled={isDownloadingPdf} variant="outline" className="w-full bg-stone-950 border-stone-700 text-stone-300 hover:bg-stone-800 hover:text-white">
-                    {isDownloadingPdf ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2 text-stone-400" />} Baixar Boleto
-                 </Button>
-              </div>
-            </div>
-          )}
-
+          
         </DialogContent>
       </Dialog>
     </div>
@@ -1010,7 +677,7 @@ function StatusBadge({ status, tipo }: { status: string, tipo: string }) {
     colorClass = "text-emerald-400 bg-emerald-950/40 border-emerald-900/50";
   } else if (normalized.includes('prejuízo') || normalized.includes('divergent')) {
     colorClass = "text-red-400 bg-red-950/40 border-red-900/50";
-  } else if (normalized.includes('lucro') || normalized.includes('conciliado') || normalized.includes('paga')) {
+  } else if (normalized.includes('lucro') || normalized.includes('conciliado') || normalized.includes('paga') || normalized.includes('faturado')) {
     colorClass = "text-green-400 bg-green-950/40 border-green-900/50";
   } else if (normalized.includes('aguardando') || normalized.includes('aberta') || normalized.includes('fatura') || normalized.includes('tms') || normalized.includes('ct-e')) {
     colorClass = "text-yellow-400 bg-yellow-950/40 border-yellow-900/50";

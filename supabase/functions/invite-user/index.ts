@@ -1,3 +1,4 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const corsHeaders = {
@@ -5,72 +6,66 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-Deno.serve(async (req) => {
-  // Trata o CORS (Preflight)
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+serve(async (req) => {
+  // Resposta para o preflight (CORS)
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders, status: 200 })
 
   try {
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) throw new Error('Cabeçalho de autorização ausente.');
+    if (!authHeader) throw new Error('Não autorizado. Token ausente.')
 
-    // 1. Instancia o cliente do utilizador para verificar permissões
-    const userClient = createClient(
+    // 1. Cliente Admin (Para poder criar utilizadores e contornar RLS)
+    // O Supabase tem o SERVICE_ROLE_KEY escondido no ambiente automaticamente
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    )
+
+    // 2. Cliente normal (Apenas para descobrir quem fez o pedido)
+    const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
       { global: { headers: { Authorization: authHeader } } }
-    );
+    )
 
-    // Pega o utilizador da sessão
-    const { data: { user }, error: authError } = await userClient.auth.getUser();
-    if (authError || !user) throw new Error('Sessão expirada ou inválida.');
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
+    if (userError || !user) throw new Error('Utilizador não autenticado.')
 
-    // Verifica se é Admin
-    const { data: adminPerfil, error: perfilError } = await userClient
+    // 3. Obter o empresa_id de quem está a convidar
+    const { data: perfilLogado, error: perfilError } = await supabaseAdmin
       .from('perfis')
-      .select('empresa_id, role')
+      .select('empresa_id')
       .eq('id', user.id)
-      .single();
-      
-    if (perfilError) throw new Error('Erro ao validar permissões: ' + perfilError.message);
-    if (adminPerfil?.role !== 'admin') throw new Error('Apenas Administradores podem convidar membros para a equipa.');
+      .single()
 
-    // Lê os dados enviados pelo frontend
-    const body = await req.json();
-    const email = body.email;
-    const role = body.role || 'operador';
+    if (perfilError || !perfilLogado?.empresa_id) {
+      throw new Error('Não foi possível encontrar a empresa da sua conta.')
+    }
 
-    if (!email) throw new Error('O e-mail é obrigatório.');
+    const { email, role } = await req.json()
+    if (!email) throw new Error('Email é obrigatório.')
 
-    // 2. Cria o cliente Admin (Service Role) para conseguir disparar o convite
-    const adminSupabase = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    );
+    // 4. Convidar o utilizador através da API de Admin do Supabase
+    const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email)
+    if (inviteError) throw inviteError
 
-    // 3. Dispara o e-mail de convite
-    const { data: inviteData, error: inviteError } = await adminSupabase.auth.admin.inviteUserByEmail(email);
-    if (inviteError) throw new Error('Falha no Supabase ao enviar convite: ' + inviteError.message);
+    // 5. Vincular o novo utilizador à mesma empresa e definir o cargo (role)
+    if (inviteData?.user) {
+      const { error: updateError } = await supabaseAdmin
+        .from('perfis')
+        .upsert({ 
+          id: inviteData.user.id, 
+          email: email,
+          role: role || 'operador',
+          empresa_id: perfilLogado.empresa_id // Mágica acontece aqui!
+        }, { onConflict: 'id' })
 
-    // 4. Vincula o perfil recém-criado à mesma empresa do Admin
-    const { error: updateError } = await adminSupabase.from('perfis').update({
-      empresa_id: adminPerfil.empresa_id,
-      role: role
-    }).eq('id', inviteData.user.id);
+      if (updateError) throw updateError
+    }
 
-    if (updateError) throw new Error('O convite foi enviado, mas houve erro ao vincular a empresa: ' + updateError.message);
-
-    // Sucesso
-    return new Response(JSON.stringify({ success: true }), { 
-      status: 200, 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
-    });
+    return new Response(JSON.stringify({ success: true, message: 'Convite enviado.' }), { headers: { ...corsHeaders, "Content-Type": "application/json" } })
 
   } catch (error: any) {
-    console.error("ERRO EDGE FUNCTION:", error.message);
-    // TRUQUE: Retornamos status 200 para o frontend não ocultar o erro, e mandamos a chave 'error'
-    return new Response(JSON.stringify({ error: error.message }), { 
-      status: 200, 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
-    });
+    return new Response(JSON.stringify({ error: error.message }), { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 })
   }
 })

@@ -10,12 +10,7 @@ import {
   DialogDescription 
 } from "@/components/ui/dialog"; 
 import { Calendar as CalendarIcon, Search, RefreshCw, Loader2, Package, Truck, DollarSign } from "lucide-react";
-
-// Suas credenciais
-const supabase = createClient(
-  'https://foulnpmrfyuwvqppdrnt.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZvdWxucG1yZnl1d3ZxcHBkcm50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1MDE1NjYsImV4cCI6MjA4NTA3NzU2Nn0.NX3r510aLr4CAROBdFV75VvVjbIz4aj9qEetsF6UQBU'
-);
+import { supabase } from "@/lib/supabase";
 
 export default function Pedidos() {
   const [pedidos, setPedidos] = useState<any[]>([]);

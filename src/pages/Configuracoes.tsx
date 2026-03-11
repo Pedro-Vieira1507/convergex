@@ -7,7 +7,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Settings, Truck, CheckCircle2, XCircle, Loader2, ShoppingBag, Mail, Shield, User, UserPlus, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -45,7 +44,6 @@ export default function Configuracoes() {
   const [isTestingBraspress, setIsTestingBraspress] = useState(false);
   const [braspressStatus, setBraspressStatus] = useState<"idle" | "success" | "error">("idle");
 
-  // --- NOVOS ESTADOS: CORREIOS ---
   const [correiosContrato, setCorreiosContrato] = useState("");
   const [correiosDr, setCorreiosDr] = useState("");
   const [correiosToken, setCorreiosToken] = useState("");
@@ -60,9 +58,29 @@ export default function Configuracoes() {
   const { data: membros = [], isLoading: isLoadingMembros } = useQuery({
     queryKey: ['equipa-membros'],
     queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Sessão expirada. Faça login novamente.");
+
+      const { data: meuPerfil, error: perfilError } = await supabase
+        .from('perfis')
+        .select('empresa_id')
+        .eq('id', session.user.id)
+        .single();
+      
+      if (perfilError) throw perfilError;
+
+      if (!meuPerfil?.empresa_id) {
+         const { data } = await supabase
+          .from('perfis')
+          .select('id, nome_completo, email, role, created_at')
+          .eq('id', session.user.id);
+         return data || [];
+      }
+
       const { data, error } = await supabase
         .from('perfis')
         .select('id, nome_completo, email, role, created_at')
+        .eq('empresa_id', meuPerfil.empresa_id) 
         .order('created_at', { ascending: true });
       
       if (error) throw error;
@@ -77,9 +95,7 @@ export default function Configuracoes() {
 
       const { data, error } = await supabase.functions.invoke('invite-user', {
         body: { email, role },
-        headers: {
-          Authorization: `Bearer ${session.access_token}`
-        }
+        headers: { Authorization: `Bearer ${session.access_token}` }
       });
       
       if (error) throw error;
@@ -93,6 +109,25 @@ export default function Configuracoes() {
     },
     onError: (err: any) => {
       toast({ variant: "destructive", title: "Erro ao convidar", description: err.message });
+    }
+  });
+
+  // MUTAÇÃO: ALTERAR PERMISSÃO DE UM USUÁRIO
+  const alterarPermissao = useMutation({
+    mutationFn: async ({ userId, novoRole }: { userId: string, novoRole: string }) => {
+      const { error } = await supabase
+        .from('perfis')
+        .update({ role: novoRole })
+        .eq('id', userId);
+
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast({ title: "Permissão atualizada!", description: "O nível de acesso foi alterado com sucesso." });
+      queryClient.invalidateQueries({ queryKey: ['equipa-membros'] });
+    },
+    onError: (err: any) => {
+      toast({ variant: "destructive", title: "Erro ao atualizar permissão", description: err.message });
     }
   });
 
@@ -128,8 +163,6 @@ export default function Configuracoes() {
           if (data.magento_token) setBizToken(data.magento_token);
           if (data.braspress_cnpj) setBraspressCnpj(data.braspress_cnpj);
           if (data.braspress_token) setBraspressToken(data.braspress_token);
-          
-          // Carregar credenciais Correios
           if (data.correios_contrato) setCorreiosContrato(data.correios_contrato);
           if (data.correios_dr) setCorreiosDr(data.correios_dr);
           if (data.correios_token) setCorreiosToken(data.correios_token);
@@ -167,7 +200,6 @@ export default function Configuracoes() {
     }
   };
 
-  // --- Handlers Onclick ---
   const handleSaveOnclick = async () => {
     if (!baseUrl || !apiToken) {
       toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL base e o Token da API Onclick." });
@@ -178,193 +210,125 @@ export default function Configuracoes() {
   };
 
   const handleTestOnclick = async () => {
-    if (!baseUrl || !apiToken) {
-      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
-      return;
-    }
+    if (!baseUrl || !apiToken) return;
     setIsTesting(true);
     setConnectionStatus("idle");
-
     try {
       const { data, error } = await supabase.functions.invoke('onclick-proxy', {
         body: { action: 'GET_PRODUCTS' },
         headers: { 'x-onclick-url': baseUrl, 'x-onclick-token': apiToken }
       });
-
       if (error) throw error;
       if (data && (data.error || data.message)) throw new Error(data.error || data.message);
-
       setConnectionStatus("success");
-      toast({ title: "Sucesso!", description: "Conexão com o Onclick estabelecida." });
       handleSaveOnclick(); 
     } catch (error: any) {
       setConnectionStatus("error");
-      toast({ variant: "destructive", title: "Falha na conexão", description: error.message || "Verifique a URL e o Token." });
+      toast({ variant: "destructive", title: "Falha na conexão Onclick", description: error.message });
     } finally {
       setIsTesting(false);
     }
   };
 
-  // --- Handlers Intelipost ---
   const handleSaveIntelipost = async () => {
-    if (!intelipostUrl || !intelipostKey) {
-      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL e a API Key da Intelipost." });
-      return;
-    }
+    if (!intelipostUrl || !intelipostKey) return;
     const sucesso = await saveToDatabase({ intelipost_url: intelipostUrl, intelipost_token: intelipostKey });
     if (sucesso) toast({ title: "Configurações Intelipost salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
 
   const handleTestIntelipost = async () => {
-    if (!intelipostUrl || !intelipostKey) {
-      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
-      return;
-    }
+    if (!intelipostUrl || !intelipostKey) return;
     setIsTestingIntelipost(true);
     setIntelipostStatus("idle");
-
     try {
       const { data, error } = await supabase.functions.invoke('intelipost-proxy', {
         body: { action: 'TEST_CONNECTION' },
         headers: { 'x-intelipost-url': intelipostUrl, 'api-key': intelipostKey }
       });
-
       if (error) throw error;
-      if (data && (data.error || (data.status && data.status !== "OK"))) throw new Error(data.error || "Erro de resposta da API");
-
+      if (data && (data.error || (data.status && data.status !== "OK"))) throw new Error(data.error || "Erro de API");
       setIntelipostStatus("success");
-      toast({ title: "Sucesso!", description: "Conexão com a Intelipost estabelecida." });
       handleSaveIntelipost();
     } catch (error: any) {
       setIntelipostStatus("error");
-      toast({ variant: "destructive", title: "Falha na conexão Intelipost", description: error.message || "Verifique a Chave de API." });
+      toast({ variant: "destructive", title: "Falha na conexão Intelipost", description: error.message });
     } finally {
       setIsTestingIntelipost(false);
     }
   };
 
-  // --- Handlers BizCommerce ---
   const handleSaveBiz = async () => {
-    if (!bizUrl || !bizToken) {
-      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha a URL e o Token da BizCommerce." });
-      return;
-    }
+    if (!bizUrl || !bizToken) return;
     const sucesso = await saveToDatabase({ magento_url: bizUrl, magento_token: bizToken });
     if (sucesso) toast({ title: "Configurações BizCommerce salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
 
   const handleTestBiz = async () => {
-    if (!bizUrl || !bizToken) {
-      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
-      return;
-    }
+    if (!bizUrl || !bizToken) return;
     setIsTestingBiz(true);
     setBizStatus("idle");
-
     try {
       const { data, error } = await supabase.functions.invoke('sync-magento-orders', {
-        body: { 
-          action: 'TEST_CONNECTION',
-          magentoUrl: bizUrl, 
-          magentoToken: bizToken 
-        }
+        body: { action: 'TEST_CONNECTION', magentoUrl: bizUrl, magentoToken: bizToken }
       });
-
       if (error) throw error;
-      if (data && data.message && data.message.includes("401")) {
-         throw new Error("Acesso negado. Verifique o Token.");
-      }
-
+      if (data && data.message && data.message.includes("401")) throw new Error("Acesso negado. Verifique o Token.");
       setBizStatus("success");
-      toast({ title: "Sucesso!", description: "Conexão com BizCommerce verificada." });
       handleSaveBiz();
     } catch (error: any) {
-      console.error("Erro BizCommerce:", error);
       setBizStatus("error");
-      toast({ variant: "destructive", title: "Falha na conexão", description: error.message || "Erro ao conectar com Magento." });
+      toast({ variant: "destructive", title: "Falha na conexão BizCommerce", description: error.message });
     } finally {
       setIsTestingBiz(false);
     }
   };
 
-  // --- Handlers Braspress ---
   const handleSaveBraspress = async () => {
-    if (!braspressCnpj || !braspressToken) {
-      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha o CNPJ e o Token da Braspress." });
-      return;
-    }
+    if (!braspressCnpj || !braspressToken) return;
     const sucesso = await saveToDatabase({ braspress_cnpj: braspressCnpj, braspress_token: braspressToken });
     if (sucesso) toast({ title: "Configurações Braspress salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
 
   const handleTestBraspress = async () => {
-    if (!braspressCnpj || !braspressToken) {
-      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
-      return;
-    }
+    if (!braspressCnpj || !braspressToken) return;
     setIsTestingBraspress(true);
     setBraspressStatus("idle");
-
     try {
-      const { data, error } = await supabase.functions.invoke('braspress-proxy', {
-        body: { 
-          action: 'TEST_CONNECTION',
-          cnpj: braspressCnpj,
-          token: braspressToken
-        }
+      const { error } = await supabase.functions.invoke('braspress-proxy', {
+        body: { action: 'TEST_CONNECTION', cnpj: braspressCnpj, token: braspressToken }
       });
-
       if (error) throw error;
-      
       setBraspressStatus("success");
-      toast({ title: "Sucesso!", description: "Conexão com a Braspress validada." });
       handleSaveBraspress();
     } catch (error: any) {
-      console.error("Erro Braspress:", error);
       setBraspressStatus("error");
-      toast({ variant: "destructive", title: "Falha na conexão", description: error.message || "Erro ao conectar com a API Braspress." });
+      toast({ variant: "destructive", title: "Falha na conexão Braspress", description: error.message });
     } finally {
       setIsTestingBraspress(false);
     }
   };
 
-  // --- Handlers Correios ---
   const handleSaveCorreios = async () => {
-    if (!correiosContrato || !correiosDr || !correiosToken) {
-      toast({ variant: "destructive", title: "Campos obrigatórios", description: "Preencha o Contrato, DR e Token dos Correios." });
-      return;
-    }
+    if (!correiosContrato || !correiosDr || !correiosToken) return;
     const sucesso = await saveToDatabase({ correios_contrato: correiosContrato, correios_dr: correiosDr, correios_token: correiosToken });
     if (sucesso) toast({ title: "Configurações Correios salvas", description: "As credenciais foram atualizadas na nuvem." });
   };
 
   const handleTestCorreios = async () => {
-    if (!correiosContrato || !correiosDr || !correiosToken) {
-      toast({ variant: "destructive", title: "Erro", description: "Preencha os campos antes de testar." });
-      return;
-    }
+    if (!correiosContrato || !correiosDr || !correiosToken) return;
     setIsTestingCorreios(true);
     setCorreiosStatus("idle");
-
     try {
       const { data, error } = await supabase.functions.invoke('correios-proxy', {
-        body: { 
-          action: 'TEST_CONNECTION',
-          contrato: correiosContrato,
-          dr: correiosDr,
-          token: correiosToken
-        }
+        body: { action: 'TEST_CONNECTION', contrato: correiosContrato, dr: correiosDr, token: correiosToken }
       });
-
       if (error) throw error;
       if (data.error) throw new Error(data.error);
-      
       setCorreiosStatus("success");
-      toast({ title: "Sucesso!", description: data.message || "Conexão com os Correios validada." });
       handleSaveCorreios();
     } catch (error: any) {
       setCorreiosStatus("error");
-      toast({ variant: "destructive", title: "Falha na conexão", description: error.message });
+      toast({ variant: "destructive", title: "Falha na conexão Correios", description: error.message });
     } finally {
       setIsTestingCorreios(false);
     }
@@ -376,12 +340,12 @@ export default function Configuracoes() {
 
   return (
     <div className="space-y-10 text-stone-200 pb-10">
-      <PageHeader title="Configurações da Empresa" description="Faça a gestão da equipa e das integrações de API da sua conta." />
+      <PageHeader title="Configurações da Empresa" description="Faça a gestão da equipe e das integrações de API da sua conta." />
 
       <section className="space-y-4">
         <h2 className="text-xl font-bold text-stone-100 flex items-center gap-2">
           <Shield className="w-5 h-5 text-red-500" />
-          Gestão de Equipa
+          Gestão de Equipe
         </h2>
         
         <div className="grid gap-6 md:grid-cols-[350px_1fr]">
@@ -392,7 +356,7 @@ export default function Configuracoes() {
                 Convidar Membro
               </CardTitle>
               <CardDescription className="text-stone-400">
-                Envie um acesso ao sistema para a sua equipa.
+                Envie um acesso ao sistema para a sua equipe.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -441,7 +405,7 @@ export default function Configuracoes() {
             <CardHeader className="border-b border-stone-800 bg-stone-950/50">
               <CardTitle className="text-stone-100 flex items-center gap-2">
                 <User className="w-5 h-5 text-stone-400" />
-                Membros da Equipa
+                Membros da Equipe
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
@@ -466,20 +430,31 @@ export default function Configuracoes() {
                                 <User className="w-4 h-4 text-stone-400" />
                               </div>
                               <div className="flex flex-col">
-                                <span className="font-medium text-stone-200">{membro.nome_completo || "Aguardando Registo"}</span>
+                                <span className="font-medium text-stone-200">{membro.nome_completo}</span>
                                 <span className="text-xs text-stone-500">{membro.email}</span>
                               </div>
                             </div>
                           </TableCell>
+                          
+                          {/* MENU DROPDOWN PARA ALTERAR PERMISSÃO */}
                           <TableCell>
-                            <Badge variant="outline" className={`font-medium ${
-                              membro.role === 'admin' ? 'bg-red-950/40 text-red-400 border-red-900/50' : 
-                              membro.role === 'gerente' ? 'bg-blue-950/40 text-blue-400 border-blue-900/50' : 
-                              'bg-stone-800 text-stone-300 border-stone-700'
-                            }`}>
-                              {membro.role.toUpperCase()}
-                            </Badge>
+                            <select
+                              value={membro.role}
+                              onChange={(e) => alterarPermissao.mutate({ userId: membro.id, novoRole: e.target.value })}
+                              disabled={alterarPermissao.isPending}
+                              className={cn(
+                                "flex h-8 w-[130px] rounded-md border px-2 py-1 text-xs font-bold uppercase tracking-wider focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-stone-950 appearance-none cursor-pointer",
+                                membro.role === 'admin' ? 'bg-red-950/40 text-red-400 border-red-900/50 focus:ring-red-500' : 
+                                membro.role === 'gerente' ? 'bg-blue-950/40 text-blue-400 border-blue-900/50 focus:ring-blue-500' : 
+                                'bg-stone-800 text-stone-300 border-stone-700 focus:ring-stone-500'
+                              )}
+                            >
+                              <option value="admin">ADMIN</option>
+                              <option value="gerente">GERENTE</option>
+                              <option value="operador">OPERADOR</option>
+                            </select>
                           </TableCell>
+
                           <TableCell className="text-stone-400">
                             {new Date(membro.created_at).toLocaleDateString('pt-BR')}
                           </TableCell>
@@ -501,7 +476,7 @@ export default function Configuracoes() {
         </h2>
 
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          
+          {/* CARD ONCLICK */}
           <Card className="bg-stone-900 border-stone-800 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
@@ -533,6 +508,7 @@ export default function Configuracoes() {
             </CardContent>
           </Card>
 
+          {/* CARD BIZCOMMERCE */}
           <Card className="bg-stone-900 border-orange-900/50 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
@@ -548,7 +524,6 @@ export default function Configuracoes() {
               <div className="space-y-2">
                 <Label htmlFor="bizToken" className="text-stone-400">Access Token (Integration)</Label>
                 <Input id="bizToken" type="password" placeholder="Token de Integração" value={bizToken} onChange={(e) => setBizToken(e.target.value)} className="bg-stone-950 border-stone-800 text-stone-200 focus-visible:ring-orange-500" />
-                <p className="text-[10px] text-stone-500">Gerado no Admin em: System {'>'} Extensions {'>'} Integrations.</p>
               </div>
               {bizStatus !== "idle" && (
                 <div className={cn("flex items-center gap-2 p-3 rounded-lg text-sm border", bizStatus === "success" ? "bg-green-950/40 text-green-400 border-green-900/50" : "bg-red-950/40 text-red-400 border-red-900/50")}>
@@ -565,6 +540,7 @@ export default function Configuracoes() {
             </CardContent>
           </Card>
 
+          {/* CARD INTELIPOST */}
           <Card className="bg-stone-900 border-blue-900/50 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
@@ -596,6 +572,7 @@ export default function Configuracoes() {
             </CardContent>
           </Card>
 
+          {/* CARD BRASPRESS */}
           <Card className="bg-stone-900 border-emerald-900/50 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
@@ -627,7 +604,7 @@ export default function Configuracoes() {
             </CardContent>
           </Card>
 
-          {/* CARD DOS CORREIOS */}
+          {/* CARD CORREIOS */}
           <Card className="bg-stone-900 border-yellow-900/50 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg font-heading flex items-center gap-2 text-stone-100">
