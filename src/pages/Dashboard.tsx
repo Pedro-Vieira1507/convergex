@@ -48,6 +48,8 @@ export default function Dashboard() {
 
   // ESTADOS DA AUDITORIA DE FRETES
   const [auditMetrics, setAuditMetrics] = useState<any[]>([]);
+  const [totalAuditLucro, setTotalAuditLucro] = useState(0);
+  const [totalAuditPrejuizo, setTotalAuditPrejuizo] = useState(0);
   const [loadingAudit, setLoadingAudit] = useState(true);
 
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
@@ -173,7 +175,7 @@ export default function Dashboard() {
     setLoadingStock(false);
   };
 
-  // BUSCAR DADOS DE AUDITORIA (LUCRO/PREJUÍZO)
+  // BUSCAR DADOS DE AUDITORIA (LUCRO/PREJUÍZO) CONFIANDO 100% NO STATUS DO BD
   const fetchAuditMetrics = async () => {
     setLoadingAudit(true);
     const { data, error } = await supabase
@@ -181,18 +183,23 @@ export default function Dashboard() {
       .select('transportadora, status, divergencia');
 
     if (!error && data) {
+      let globalLucro = 0;
+      let globalPrejuizo = 0;
       const summary: Record<string, { lucro: number, prejuizo: number }> = {};
       
       data.forEach((item: any) => {
         const t = item.transportadora || 'Outros';
         if (!summary[t]) summary[t] = { lucro: 0, prejuizo: 0 };
 
-        const div = Number(item.divergencia || 0);
+        // Pega apenas a divergência pura já calculada, ignorando erros e dados aguardando
+        const div = Math.abs(Number(item.divergencia || 0));
         
         if (item.status === 'Lucro TMS') {
-          summary[t].lucro += Math.abs(div);
+          summary[t].lucro += div;
+          globalLucro += div;
         } else if (item.status === 'Prejuízo TMS') {
-          summary[t].prejuizo += Math.abs(div);
+          summary[t].prejuizo += div;
+          globalPrejuizo += div;
         }
       });
 
@@ -203,6 +210,8 @@ export default function Dashboard() {
       }));
 
       setAuditMetrics(formattedArray);
+      setTotalAuditLucro(globalLucro);
+      setTotalAuditPrejuizo(globalPrejuizo);
     }
     setLoadingAudit(false);
   };
@@ -305,7 +314,6 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* Agora abre o modal de estoque */}
         <div className="w-full min-w-0 cursor-pointer transition-transform hover:-translate-y-1" onClick={() => openHistory('stock')}>
             <StatsCard
               title="Alerta Estoque"
@@ -354,16 +362,22 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* AUDITORIA DE FRETES (NOVO) */}
+        {/* AUDITORIA DE FRETES */}
         <Card className="shadow-sm bg-stone-900 border-stone-800 flex flex-col h-full overflow-hidden w-full min-w-0 text-stone-200">
-          <CardHeader className="flex flex-row items-center justify-between pb-2 bg-stone-950/50 flex-wrap gap-2 border-b border-stone-800">
-            <div className="min-w-0 flex-1">
+          <CardHeader className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-2 bg-stone-950/50 flex-wrap gap-2 border-b border-stone-800">
+            <div className="min-w-0 flex-1 w-full">
               <CardTitle className="text-base sm:text-lg font-heading truncate flex items-center gap-2 text-stone-100">
                  <Scale className="w-5 h-5 text-emerald-500" /> Auditoria de Fretes
               </CardTitle>
-              <CardDescription className="text-xs sm:text-sm truncate text-stone-400">Lucro e Prejuízo por Transportadora</CardDescription>
+              {/* O NOVO CABEÇALHO GLOBAL */}
+              <CardDescription className="text-xs sm:text-sm truncate text-stone-400 mt-1 flex items-center gap-2 flex-wrap">
+                 <span>Balanço Global:</span>
+                 <span className="text-emerald-400 font-bold">+{totalAuditLucro.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span>
+                 <span className="text-stone-600">|</span>
+                 <span className="text-red-400 font-bold">-{totalAuditPrejuizo.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</span>
+              </CardDescription>
             </div>
-            <Button variant="ghost" size="sm" asChild className="flex-shrink-0 hover:bg-stone-800">
+            <Button variant="ghost" size="sm" asChild className="flex-shrink-0 hover:bg-stone-800 w-full sm:w-auto mt-2 sm:mt-0">
                 <Link to="/auditoria" className="text-emerald-500 hover:text-emerald-400 text-xs sm:text-sm px-0 sm:px-3">
                     Módulo completo <ArrowRight className="w-3 h-3 sm:w-4 sm:h-4 ml-1" />
                 </Link>
@@ -438,7 +452,6 @@ export default function Dashboard() {
 
           <div className={`mt-4 ${historyType !== 'stock' ? 'border border-stone-800 rounded-lg overflow-x-auto' : ''} max-h-[350px] overflow-y-auto custom-scrollbar`}>
              {historyType === 'stock' ? (
-                // RENDERIZAÇÃO DO MODAL DE ESTOQUE
                 <div className="space-y-3 pr-2">
                   {loadingStock ? (
                     <div className="flex justify-center py-4 text-stone-500"><Loader2 className="w-6 h-6 animate-spin" /></div>
@@ -469,7 +482,6 @@ export default function Dashboard() {
                   )}
                 </div>
              ) : (
-               // RENDERIZAÇÃO DAS TABELAS ORIGINAIS (PEDIDOS, RECEITA, RECORRÊNCIA)
                <table className="w-full text-sm min-w-[350px]">
                   <thead className="bg-stone-950 text-stone-400 sticky top-0">
                     <tr>

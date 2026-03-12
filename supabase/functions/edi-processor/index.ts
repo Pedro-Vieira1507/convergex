@@ -63,9 +63,8 @@ serve(async (req) => {
 
     const arquivosValidos = files.filter(file => {
         const fileDate = new Date(file.created_at)
-        const isDateValid = fileDate >= start && fileDate <= end
+        const isDateValid = (transportadora === 'Movvi' || transportadora === 'Jamef') ? true : (fileDate >= start && fileDate <= end)
         
-        // 🎯 AJUSTE 1: A Jamef agora aceita formalmente os arquivos .xml
         const isTypeValid = 
             (transportadora === 'Braspress' && (file.name.toLowerCase().endsWith('.xml'))) ||
             (transportadora === 'Jamef' && (file.name.toLowerCase().endsWith('.xml') || file.name.toLowerCase().endsWith('.txt') || file.name.toUpperCase().includes('NOTFIS') || file.name.toUpperCase().includes('CONEMB'))) ||
@@ -97,7 +96,6 @@ serve(async (req) => {
         // ================= BRASPRESS =================
         if (transportadora === 'Braspress') {
             let freteReal = 0, chaveNFe = "N/A", numeroCTe = file.name, valorCarga = 0
-            
             const vTPrestMatch = text.match(/<vTPrest>([^<]+)<\/vTPrest>/)
             if (vTPrestMatch) freteReal = parseFloat(vTPrestMatch[1])
             const nCTMatch = text.match(/<nCT>([^<]+)<\/nCT>/)
@@ -123,21 +121,12 @@ serve(async (req) => {
         // ================= JAMEF =================
         if (transportadora === 'Jamef') {
             const isXml = file.name.toLowerCase().endsWith('.xml')
-
-            // 🎯 AJUSTE 2: Nova lógica híbrida da Jamef
             if (isXml) {
-                // LÓGICA XML (Idêntica à Braspress)
                 let freteReal = 0, chaveNFe = "N/A", numeroCTe = file.name, valorCarga = 0
-                
                 const vTPrestMatch = text.match(/<vTPrest>([^<]+)<\/vTPrest>/)
                 if (vTPrestMatch) freteReal = parseFloat(vTPrestMatch[1])
-                
                 const nCTMatch = text.match(/<nCT>([^<]+)<\/nCT>/)
                 if (nCTMatch) numeroCTe = `CTe-${nCTMatch[1]}`
-                
-                const vCargaMatch = text.match(/<vCarga>([^<]+)<\/vCarga>/)
-                if (vCargaMatch) valorCarga = parseFloat(vCargaMatch[1])
-
                 const nfes = []
                 const chaveRegex = /<chave>([^<]{44})<\/chave>/g
                 let match
@@ -146,41 +135,83 @@ serve(async (req) => {
                 }
                 if (nfes.length > 0) chaveNFe = nfes.join(', ')
 
-                itensDoArquivo.push({
-                    id: file.id, awb: numeroCTe, pedido: chaveNFe, transportadora,
-                    frete_real: freteReal, data: file.created_at, tipo_registro: 'pacote',
-                    raw_data: { fileName: file.name, valorCarga, tipo: 'XML' }
-                })
+                let dataEmissaoIso = file.created_at;
+                const dhEmiMatch = text.match(/<dhEmi>([^<]+)<\/dhEmi>/);
+                if (dhEmiMatch) {
+                    try { dataEmissaoIso = new Date(dhEmiMatch[1]).toISOString(); } catch(e){}
+                }
+
+                const dataLinha = new Date(dataEmissaoIso);
+                if (dataLinha >= start && dataLinha <= end) {
+                    itensDoArquivo.push({
+                        id: file.id, awb: numeroCTe, pedido: chaveNFe, transportadora,
+                        frete_real: freteReal, data: dataEmissaoIso, tipo_registro: 'pacote',
+                        raw_data: { fileName: file.name, tipo: 'XML' }
+                    })
+                }
             } else {
-                // LÓGICA TXT (Mantida para o legado de NOTFIS / CONEMB)
                 const textUpper = text.toUpperCase()
                 const isConemb = textUpper.includes('320CONHE') || file.name.toUpperCase().includes('CONEMB')
                 const linhas = text.split('\n')
 
                 if (isConemb) {
-                    linhas.forEach((linha, i) => {
-                       if (linha.startsWith('322')) {
-                          const cte = linha.substring(18, 30).trim() || `CTE-L${i}`
-                          let nf = "N/A"
-                          const nfeMatch = linha.match(/088450410001901\s+(\d{8})/)
-                          if (nfeMatch) {
-                              nf = nfeMatch[1].replace(/^0+/, '') 
-                          } else {
-                              const fallbackNf = linha.match(/\s{2}(\d{8})\s{2,}/)
-                              if(fallbackNf) nf = fallbackNf[1].replace(/^0+/, '')
-                          }
-                          let frete = 0
-                          const valorString = linha.substring(61, 76)
-                          if (!isNaN(Number(valorString))) {
-                              frete = Number(valorString) / 100 
-                          }
-                          itensDoArquivo.push({
-                              id: `${file.id}-${cte}`, awb: cte, pedido: nf, transportadora,
-                              frete_real: frete, data: file.created_at, tipo_registro: 'pacote',
-                              raw_data: { fileName: file.name, tipo: 'CONEMB' }
-                          })
-                       }
-                    })
+                    let currentCte = null;
+                    let currentFrete = 0;
+                    let currentDataIso = file.created_at;
+                    let currentNfes: string[] = [];
+
+                    const gravarPacoteAtual = () => {
+                        if (currentCte) {
+                            itensDoArquivo.push({
+                                id: `${file.id}-${currentCte}`,
+                                awb: currentCte,
+                                pedido: currentNfes.length > 0 ? currentNfes.join(', ') : 'N/A',
+                                transportadora, 
+                                frete_real: currentFrete,
+                                data: currentDataIso,
+                                tipo_registro: 'pacote',
+                                raw_data: { fileName: file.name, tipo: 'CONEMB' }
+                            });
+                        }
+                    };
+
+                    for (let i = 0; i < linhas.length; i++) {
+                        const linha = linhas[i].trim();
+                        
+                        if (linha.startsWith('322')) {
+                            gravarPacoteAtual();
+                            
+                            currentCte = linha.substring(18, 30).trim() || `CTE-L${i}`;
+                            
+                            const freteStr = linha.substring(46, 61);
+                            currentFrete = !isNaN(Number(freteStr)) ? Number(freteStr) / 100 : 0;
+                            
+                            const dataStr = linha.substring(30, 38);
+                            if (dataStr.length === 8 && !isNaN(Number(dataStr))) {
+                                const dia = dataStr.substring(0, 2);
+                                const mes = dataStr.substring(2, 4);
+                                const ano = dataStr.substring(4, 8);
+                                currentDataIso = new Date(`${ano}-${mes}-${dia}T12:00:00Z`).toISOString();
+                            } else {
+                                currentDataIso = file.created_at;
+                            }
+                            
+                            currentNfes = [];
+                            const nfeMatch = linha.match(/088450410001901\s+(\d{8})/);
+                            if (nfeMatch) currentNfes.push(nfeMatch[1].replace(/^0+/, ''));
+                            
+                        } else if (linha.startsWith('323')) {
+                            const trailingNumbers = linha.match(/0*(\d{1,9})$/);
+                            if (trailingNumbers) {
+                                const cleanNf = trailingNumbers[1];
+                                if (!currentNfes.includes(cleanNf)) {
+                                    currentNfes.push(cleanNf);
+                                }
+                            }
+                        }
+                    }
+                    gravarPacoteAtual();
+
                 } else {
                     let freteDestacado = 0, chaveNFe = "N/A"
                     linhas.forEach(linha => {
@@ -207,15 +238,8 @@ serve(async (req) => {
             if (isExcel && arrayBuffer) {
                 const workbook = XLSX.read(arrayBuffer, { type: 'array' });
                 const sheetName = workbook.SheetNames[0]; 
-                linhasMatriz = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
+                linhasMatriz = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '' });
             } 
-            else if (text) {
-                const linhasTexto = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                if(linhasTexto.length > 0) {
-                   const separador = linhasTexto[0].includes(';') ? ';' : ',';
-                   linhasMatriz = linhasTexto.map(linha => linha.split(separador).map(c => c.replace(/["\r]/g, '').trim()));
-                }
-            }
 
             if (linhasMatriz.length > 0) {
                 let headerIndex = -1;
@@ -233,7 +257,8 @@ serve(async (req) => {
                     
                     const idxCTe = headers.findIndex(h => h === 'CTRC' || h.includes('CTRC') || h === 'CTE' || h === 'CONHECIMENTO');
                     const idxNF = headers.findIndex(h => h === 'NF' || h === 'NOTA FISCAL' || h.includes('NOTA') || h.includes('PEDIDO'));
-                    const idxValor = headers.findIndex(h => h === 'VALOR FRETE' || h === 'VLR FRETE' || h === 'VLR. FRETE' || h === 'VALORFRETE' || h === 'FRETE');
+                    const idxValor = headers.findIndex(h => h === 'VALOR FRETE' || h === 'VLR FRETE' || h === 'VLR. FRETE' || h === 'VALORFRETE' || (h.includes('FRETE') && (h.includes('VLR') || h.includes('VALOR'))));
+                    const idxEmissao = headers.findIndex(h => h.includes('EMISSAO') || h.includes('DATA'));
 
                     for (let i = headerIndex + 1; i < linhasMatriz.length; i++) {
                         const colunas = linhasMatriz[i] || [];
@@ -251,12 +276,35 @@ serve(async (req) => {
                             let val = colunas[idxValor];
                             if (typeof val === 'number') {
                                 valorFrete = val;
-                            } else if (typeof val === 'string') {
-                                let valorStr = val.replace(/R\$/gi, '').replace(/\s/g, '').replace(/\./g, '').replace(',', '.');
+                            } else if (val) {
+                                let valorStr = String(val).replace(/R\$/gi, '').trim();
+                                if (valorStr.includes(',')) {
+                                    valorStr = valorStr.replace(/\./g, '').replace(',', '.');
+                                }
                                 valorFrete = parseFloat(valorStr);
                             }
                         }
                         if (isNaN(valorFrete)) valorFrete = 0;
+
+                        let dataEmissaoIso = file.created_at; 
+                        if (idxEmissao >= 0 && colunas[idxEmissao]) {
+                            let dataVal = colunas[idxEmissao];
+                            if (typeof dataVal === 'number') {
+                                const jsDate = new Date(Math.round((dataVal - 25569) * 86400 * 1000));
+                                dataEmissaoIso = jsDate.toISOString();
+                            } else if (typeof dataVal === 'string') {
+                                const dataStr = String(dataVal).trim();
+                                const parts = dataStr.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                                if (parts) {
+                                    dataEmissaoIso = new Date(`${parts[3]}-${parts[2]}-${parts[1]}T12:00:00Z`).toISOString();
+                                }
+                            }
+                        }
+
+                        const dataLinha = new Date(dataEmissaoIso);
+                        if (dataLinha < start || dataLinha > end) {
+                            continue; 
+                        }
 
                         itensDoArquivo.push({
                             id: `${file.id}-${cte}`,
@@ -264,7 +312,7 @@ serve(async (req) => {
                             pedido: nf, 
                             transportadora,
                             frete_real: valorFrete, 
-                            data: file.created_at,
+                            data: dataEmissaoIso, 
                             tipo_registro: 'pacote', 
                             raw_data: { fileName: file.name, linhaExcel: i, ctrc: cte, nota: nf }
                         });
@@ -313,11 +361,21 @@ serve(async (req) => {
     const processados = resultadosAninhados.flat().filter(r => r !== null && r !== undefined)
 
     if (processados.length > 0) {
-        const registrosParaSalvar = processados.map(r => ({
+        
+        // 🎯 A MÁGICA DE SEGURANÇA AQUI: Deduplicação!
+        // Se houver dois AWBs (CT-es) iguais, ele guarda só o último. 
+        // Assim a base de dados nunca mais rejeita o lote!
+        const mapaUnicos = new Map();
+        for (const r of processados) {
+            mapaUnicos.set(r.awb, r);
+        }
+        const unicosParaSalvar = Array.from(mapaUnicos.values());
+
+        const registrosParaSalvar = unicosParaSalvar.map((r: any) => ({
             empresa_id: empresaId,
             awb: r.awb,
             pedido: r.pedido,
-            transportadora: r.transportadora,
+            transportadora: r.transportadora, 
             frete_estimado: r.frete_estimado,
             frete_real: r.frete_real,
             divergencia: r.divergencia_financeira,
