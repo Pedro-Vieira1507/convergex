@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Menu, Zap } from "lucide-react";
@@ -11,6 +12,7 @@ const navLinks = [
 
 const Header = () => {
   const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
 
   const scrollTo = (href: string) => {
     setOpen(false);
@@ -18,11 +20,16 @@ const Header = () => {
     el?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const handleLoginClick = () => {
+    setOpen(false); // Fecha o menu mobile se estiver aberto
+    navigate('/login');
+  };
+
   return (
     <header className="fixed top-0 left-0 right-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-lg">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
         {/* Logo */}
-        <a href="#" className="flex items-center gap-2 font-heading text-xl font-bold text-foreground">
+        <a href="/" className="flex items-center gap-2 font-heading text-xl font-bold text-foreground">
           <Zap className="h-6 w-6 text-primary" />
           ConvergeX
         </a>
@@ -42,8 +49,12 @@ const Header = () => {
 
         {/* Desktop CTAs */}
         <div className="hidden items-center gap-3 md:flex">
-          <Button variant="ghost" size="sm">Login</Button>
-          <Button size="sm" onClick={() => scrollTo("#planos")}>Começar Agora</Button>
+          <Button variant="ghost" size="sm" onClick={handleLoginClick}>
+            Login
+          </Button>
+          <Button size="sm" onClick={() => scrollTo("#planos")}>
+            Começar Agora
+          </Button>
         </div>
 
         {/* Mobile menu */}
@@ -63,8 +74,12 @@ const Header = () => {
                 </button>
               ))}
               <hr className="border-border" />
-              <Button variant="ghost" size="sm" className="justify-start">Login</Button>
-              <Button size="sm" onClick={() => scrollTo("#planos")}>Começar Agora</Button>
+              <Button variant="ghost" size="sm" className="justify-start" onClick={handleLoginClick}>
+                Login
+              </Button>
+              <Button size="sm" onClick={() => scrollTo("#planos")}>
+                Começar Agora
+              </Button>
             </nav>
           </SheetContent>
         </Sheet>
